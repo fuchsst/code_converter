@@ -1,0 +1,22 @@
+# Core dependencies
+crewai>=0.114.0
+google-generativeai>=0.8.4
+python-dotenv>=1.1.0
+clang>=20.1.0
+
+# RAG dependencies (in-memory)
+sentence-transformers>=4.0.2
+numpy>=2.2.4
+scikit-learn>=1.6.1 # For cosine similarity
+
+# Optional: For specific file parsing if needed later
+fire
+# python-markdown
+# beautifulsoup4
+# lxml
+# pypdf
+# python-docx
+# openpyxl
+
+# Optional: For CrewAI tools if used directly
+crewai-tools>=0.40.1
