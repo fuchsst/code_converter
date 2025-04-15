@@ -3,6 +3,7 @@ crewai>=0.114.0
 google-generativeai>=0.8.4
 python-dotenv>=1.1.0
 clang>=20.1.0
+tiktoken>=0.7.0 # For token counting
 
 # RAG dependencies (in-memory)
 sentence-transformers>=4.0.2
@@ -20,3 +21,4 @@ fire
 
 # Optional: For CrewAI tools if used directly
 crewai-tools>=0.40.1
+crewai[tools]

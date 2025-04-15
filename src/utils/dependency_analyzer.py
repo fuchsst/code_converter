@@ -33,25 +33,6 @@ def find_compile_commands(project_dir):
         logger.warning(f"compile_commands.json not found in {project_dir}. Clang analysis might be inaccurate.")
         return None
 
-def find_project_files(source_dir):
-    """Finds all potential source and header files in the project directory."""
-    cpp_files = []
-    logger.info(f"Searching for C++/header files in: {source_dir}")
-    if not os.path.isdir(source_dir):
-        logger.error(f"Source directory not found: {source_dir}")
-        return cpp_files
-
-    for root, _, files in os.walk(source_dir):
-        for file in files:
-            if file.lower().endswith(('.c', '.cc', '.cpp', '.cxx', '.h', '.hh', '.hpp', '.hxx')):
-                full_path = os.path.join(root, file)
-                # Ensure the file is within the source directory (avoid symlinks pointing outside)
-                if os.path.commonpath([os.path.abspath(full_path), os.path.abspath(source_dir)]) == os.path.abspath(source_dir):
-                    cpp_files.append(full_path)
-
-    logger.info(f"Found {len(cpp_files)} potential C++/header files.")
-    return cpp_files
-
 # --- Clang-based Include Extraction ---
 
 def extract_includes_with_clang(file_path, compile_db, index, source_dir_abs):
@@ -153,12 +134,8 @@ def generate_include_graph(source_dir, output_path, compile_commands_path=None):
     files_in_db = {os.path.abspath(cmd.filename) for cmd in compile_db.getAllCompileCommands()}
     logger.info(f"Found {len(files_in_db)} files listed in {compile_commands_path}")
 
-    # Scan directory to potentially include headers not explicitly compiled
-    # Be careful, parsing headers directly might fail without proper context from a .cpp
-    # project_files = find_project_files(abs_source_dir)
-    # files_to_process = set(project_files).union(files_in_db)
-    # For simplicity and accuracy, let's primarily focus on files in the compile_db
     files_to_process = files_in_db
+    logger.warning("Processing only files listed in compile_commands.json. Header files not included by these units might be missed in the dependency graph.")
 
     if not files_to_process:
         logger.warning(f"No files found in compile_commands.json within {source_dir}. Cannot generate graph.")

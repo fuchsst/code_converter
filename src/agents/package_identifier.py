@@ -7,8 +7,8 @@ import config
 
 logger = get_logger(__name__)
 
-# TODO: Configure the actual LLM instance (e.g., Gemini)
-# llm = get_llm_client(model_name=config.GEMINI_MODEL_NAME) # Example
+# LLM configuration is handled by the Crew during execution based on the instance
+# passed to the Crew object (e.g., in the StepExecutor).
 
 class PackageIdentifierAgent:
     """
@@ -16,9 +16,8 @@ class PackageIdentifierAgent:
     logical work packages for the C++ to Godot conversion.
     """
     def __init__(self):
-        # TODO: Replace placeholder LLM with actual configured instance
-        self.llm_placeholder = "PlaceholderLLM_PackageIdentifier"
-        logger.info(f"Initializing PackageIdentifierAgent with LLM: {self.llm_placeholder}")
+        # LLM configuration is managed by the Crew during execution
+        logger.info(f"Initializing PackageIdentifierAgent (LLM configuration managed by Crew using model like: {config.ANALYZER_MODEL})")
 
     def get_agent(self):
         """Creates and returns the CrewAI Agent instance."""
@@ -38,7 +37,7 @@ class PackageIdentifierAgent:
                 "propose logical partitions to break down complex systems into manageable units "
                 "for phased migration or refactoring."
             ),
-            # llm=self.llm_placeholder, # TODO: Use actual LLM instance
+            # llm=... # LLM is set by the Crew instance during kickoff
             verbose=True,
             allow_delegation=False,
             # memory=True # Consider if memory is needed across iterations within this agent's task

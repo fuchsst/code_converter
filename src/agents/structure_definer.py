@@ -6,9 +6,6 @@ import config
 
 logger = get_logger(__name__)
 
-# TODO: Ensure the LLM instance used by CrewAI is correctly configured globally
-#       or passed explicitly during Agent initialization if needed.
-#       Referencing config.MAPPER_MODEL (or a dedicated structure model if defined).
 
 class StructureDefinerAgent:
     """
@@ -26,18 +23,16 @@ class StructureDefinerAgent:
             role="Godot Architecture Designer",
             goal=(
                 "Based on the provided C++ work package definition (file list, description) and "
-                "selected C++ code snippets, propose a logical Godot 4.x project structure. "
-                "This includes suggesting scene layouts, node hierarchies (e.g., using Node2D, Control, CharacterBody3D), "
-                "script names and their potential responsibilities (in GDScript or C# as per target), "
-                "and how the C++ functionality might map to Godot concepts. "
-                "Focus on creating a clear, maintainable, and idiomatic Godot structure."
+                "selected C++ code snippets, propose a logical Godot 4.x project structure as a **JSON object**, "
+                f"adhering to SOLID principles and promoting good separation of concerns. The target language for scripts should be {config.TARGET_LANGUAGE}. "
+                "The JSON output must conform to the structure specified in the task's expected_output, including keys like `target_language`, `base_directory`, `scenes` (with `file_path`, `root_node_name`, `root_node_type`, `script_path`, `children`, `mapping_notes`), and `scripts` (with `file_path`, `attached_to_node`, `attached_to_scene`, `responsibilities`, `mapping_notes`). "
+                "Analyze the C++ code to suggest appropriate scene/node hierarchies. Crucially, propose script responsibilities that are focused and decoupled (e.g., separate scripts for input handling, state management, UI logic, core mechanics) rather than large, monolithic scripts. Format the entire proposal as a single, valid JSON object."
             ),
             backstory=(
-                "You are a seasoned game developer with deep expertise in Godot Engine 4.x architecture "
-                "and best practices. You excel at translating requirements and existing code structures "
-                "(even from different languages/engines like C++) into well-organized Godot projects. "
-                "You understand scene composition, node inheritance, signal usage, and how to structure "
-                "scripts effectively for clarity and performance."
+                "You are a seasoned game developer and software architect with deep expertise in Godot Engine 4.x architecture, "
+                "SOLID design principles, and best practices for maintainable game code. You excel at translating requirements and existing code structures "
+                "(even from different languages/engines like C++) into well-organized, decoupled Godot projects. "
+                "You understand scene composition, node inheritance, signal usage, and how to structure scripts effectively for clarity, testability, and performance, avoiding overly complex single scripts."
             ),
             # llm=... # Let CrewAI handle LLM based on global config or Crew setup
             verbose=True,

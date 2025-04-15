@@ -1,10 +1,10 @@
 # src/core/context_manager.py
 import os
 import json
-import sys
-import tempfile
+import re
 from logger_setup import get_logger
 import config
+import tiktoken # Added for token counting
 
 logger = get_logger(__name__)
 
@@ -20,25 +20,17 @@ except Exception as e:
     print(f"Error initializing libclang: {e}. Context extraction might fail.")
     clang = None
 
-# --- Gemini Imports ---
+# --- Tiktoken Initializer ---
+# Attempt to get a default tokenizer. cl100k_base is common for GPT-4/3.5/Embedding models
 try:
-    import google.generativeai as genai
-    if not config.GEMINI_API_KEY:
-        logger.warning("GEMINI_API_KEY not set. Token counting might fail or use estimates.")
-        genai_model = None
-    else:
-        # Initialize a model instance specifically for token counting
-        # Using the default agent model, but could be any valid Gemini model
-        genai.configure(api_key=config.GEMINI_API_KEY) # Ensure configured
-        genai_model = genai.GenerativeModel(config.DEFAULT_AGENT_MODEL)
-        logger.info(f"Gemini model '{config.DEFAULT_AGENT_MODEL}' initialized for token counting.")
-except ImportError:
-    logger.error("google-generativeai library not found. Please install it. Token counting will use estimates.")
-    genai = None
-    genai_model = None
+    # We could use specific model names from config to appropriate tokenizers if needed
+    # For now, use a common default.
+    tokenizer = tiktoken.get_encoding("cl100k_base")
+    logger.info("Tiktoken tokenizer 'cl100k_base' initialized for token counting.")
 except Exception as e:
-    logger.error(f"Failed to initialize Gemini model for token counting: {e}", exc_info=True)
-    genai_model = None
+    logger.error(f"Failed to initialize tiktoken tokenizer: {e}. Token counting might be inaccurate.", exc_info=True)
+    tokenizer = None
+
 
 # --- Clang Helper ---
 # Define kinds of cursors we want to extract for interfaces
@@ -61,14 +53,30 @@ INTERFACE_CURSOR_KINDS = [
 
 # --- File Reading Utility ---
 
-def read_file_content(file_path: str) -> str | None:
-    """Reads content from a file, handling potential encoding issues."""
+def read_file_content(file_path: str, remove_comments_blank_lines: bool = True) -> str | None:
+    """
+    Reads content from a file, handling potential encoding issues.
+    Optionally removes C-style comments and blank lines for C/C++ files.
+    """
     logger.debug(f"Reading file: {file_path}")
     try:
         with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
             content = f.read()
-            # TODO: remove comments/empty lines here
-            return content
+
+        # Remove comments/blank lines only for C/C++ files if requested
+        if remove_comments_blank_lines and file_path.lower().endswith(('.c', '.cc', '.cpp', '.cxx', '.h', '.hh', '.hpp', '.hxx')):
+            original_len = len(content)
+            # Remove C-style block comments (/* ... */) - non-greedy
+            content = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
+            # Remove C++ style line comments (// ...)
+            content = re.sub(r'//.*', '', content)
+            # Remove blank lines (lines containing only whitespace)
+            content = "\n".join(line for line in content.splitlines() if line.strip())
+            final_len = len(content)
+            if original_len != final_len: # Log only if changes were made
+                logger.debug(f"Removed comments/blank lines from {os.path.basename(file_path)} (Length: {original_len} -> {final_len})")
+
+        return content
     except FileNotFoundError:
         logger.error(f"File not found: {file_path}")
         return None
@@ -78,29 +86,40 @@ def read_file_content(file_path: str) -> str | None:
 
 # --- Token Counting Utility ---
 
-def count_tokens(text: str) -> int:
+def count_tokens(text: str, model_name: str = "cl100k_base") -> int:
     """
-    Counts tokens using the configured Gemini model.
-    Falls back to character count if the API is unavailable.
+    Counts tokens using tiktoken. Uses cl100k_base as default.
+    Falls back to character count if tiktoken is unavailable or fails.
+
+    Args:
+        text (str): The text to count tokens for.
+        model_name (str): Optional model name hint (currently unused, defaults to cl100k_base).
+
+    Returns:
+        int: The estimated token count.
     """
-    if genai_model and text:
+    if not text:
+        return 0
+
+    if tokenizer:
         try:
-            token_count = genai_model.count_tokens(text).total_tokens
-            logger.debug(f"Counted tokens using Gemini API: {token_count}")
+            # TODO: Map model_name to specific tokenizer if needed in the future
+            # For now, using the default initialized tokenizer
+            tokens = tokenizer.encode(text)
+            token_count = len(tokens)
+            # logger.debug(f"Counted tokens using tiktoken ({model_name} -> cl100k_base): {token_count}")
             return token_count
         except Exception as e:
-            logger.error(f"Gemini count_tokens failed: {e}. Falling back to character count.", exc_info=True)
+            logger.error(f"Tiktoken encode failed: {e}. Falling back to character count.", exc_info=True)
             # Fallback to character count
             token_count = len(text)
             logger.debug(f"Using fallback character count: {token_count}")
             return token_count
-    elif text:
-        # Fallback if genai_model is not initialized
-        token_count = len(text)
-        logger.debug(f"Gemini model not available. Using character count: {token_count}")
-        return token_count
     else:
-        return 0 # No tokens for empty text
+        # Fallback if tokenizer failed to initialize
+        token_count = len(text)
+        logger.warning(f"Tiktoken tokenizer not available. Using character count: {token_count}")
+        return token_count
 
 def check_token_limit(current_tokens: int, max_tokens: int) -> bool:
      """Checks if current tokens are within the limit."""
@@ -450,6 +469,45 @@ class ContextManager:
 
         return "\n\n".join(final_context_parts)
 
+    def _get_dependencies_for_package(self, package_relative_paths: list[str]) -> list[str]:
+        """
+        Finds direct dependencies for a list of package files using the include graph.
+
+        Args:
+            package_relative_paths (list[str]): List of relative file paths belonging to the package.
+
+        Returns:
+            list[str]: A list of unique relative paths of files directly included by the package files,
+                       excluding the package files themselves and ensuring they are within the project.
+        """
+        if not self.include_graph:
+            logger.warning("Include graph not loaded. Cannot determine dependencies.")
+            return []
+
+        all_dependencies = set()
+        package_files_set = set(p.replace('\\', '/') for p in package_relative_paths) # Normalize paths
+
+        for pkg_file_rel in package_files_set:
+            # Ensure the file exists in the graph keys (normalize just in case)
+            normalized_pkg_file = pkg_file_rel.replace('\\', '/')
+            if normalized_pkg_file in self.include_graph:
+                # Get the list of files included by this package file
+                direct_includes = self.include_graph[normalized_pkg_file]
+                if isinstance(direct_includes, list):
+                    for included_file_rel in direct_includes:
+                        normalized_include = included_file_rel.replace('\\', '/')
+                        # Add to dependencies only if it's not part of the original package
+                        if normalized_include not in package_files_set:
+                            # We assume the include graph already filtered for project files
+                            all_dependencies.add(normalized_include)
+                else:
+                    logger.warning(f"Include graph entry for '{normalized_pkg_file}' is not a list: {direct_includes}")
+            # else:
+                # logger.debug(f"Package file '{normalized_pkg_file}' not found as a key in the include graph.")
+
+        logger.debug(f"Found {len(all_dependencies)} unique dependencies for package files: {package_relative_paths}")
+        return sorted(list(all_dependencies))
+
     # --- Method for assembling context for specific steps ---
 
     def get_context_for_step(self, step_name: str, **kwargs) -> str:
@@ -467,16 +525,19 @@ class ContextManager:
         Returns:
             str: The assembled context string formatted with Markdown, or empty string on error.
         """
+        # Extract file path lists from kwargs, providing empty lists as defaults
+        primary_relative_paths = kwargs.get('primary_relative_paths', [])
+        dependency_relative_paths = kwargs.get('dependency_relative_paths', [])
+
         logger.info(f"Assembling context for STEP '{step_name}' ({len(primary_relative_paths)} primary, {len(dependency_relative_paths)} dependencies)")
 
         # --- Configuration ---
-        # Use MAX_CONTEXT_TOKENS from config, provide a large default if missing
+        # Use MAX_CONTEXT_TOKENS from config
         # Subtract a buffer for the prompt itself and potential LLM response overhead
-        prompt_buffer = getattr(config, 'PROMPT_TOKEN_BUFFER', 5000) # Configurable buffer
-        max_total_tokens = getattr(config, 'MAX_CONTEXT_TOKENS', 800000)
+        prompt_buffer = config.PROMPT_TOKEN_BUFFER
+        max_total_tokens = config.MAX_CONTEXT_TOKENS
         max_context_assembly_tokens = max_total_tokens - prompt_buffer
         if max_context_assembly_tokens <= 0:
-             logger.error(f"MAX_CONTEXT_TOKENS ({max_total_tokens}) is too small with buffer ({prompt_buffer}). Cannot assemble context.")
              logger.error(f"MAX_CONTEXT_TOKENS ({max_total_tokens}) is too small with buffer ({prompt_buffer}). Cannot assemble context.")
              return ""
 
@@ -485,8 +546,8 @@ class ContextManager:
 
         # --- Retrieve Contextual File Content ---
         # Allocate budget for file content (full + interfaces)
-        # This budget is for the content *before* Markdown formatting in _assemble_context_block
-        file_content_budget = int(max_context_assembly_tokens * 0.9) # Example: 90% for file content
+        # Use CONTEXT_FILE_BUDGET_RATIO from config
+        file_content_budget = int(max_context_assembly_tokens * config.CONTEXT_FILE_BUDGET_RATIO)
         file_content_map = self._get_contextual_content(
             primary_relative_paths=primary_relative_paths,
             dependency_relative_paths=dependency_relative_paths,

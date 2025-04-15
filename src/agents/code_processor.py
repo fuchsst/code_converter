@@ -1,83 +1,54 @@
 # src/agents/code_processor.py
 from crewai import Agent
+# Removed tool imports: FileReadTool, FileWriteTool, validate_gdscript_syntax, replace_content_in_file
 from logger_setup import get_logger
 import config
-from core.api_utils import call_gemini_api # Direct call needed for internal looping
-from tools.godot_validator_tool import validate_gdscript_syntax # Import the validator tool
-
-# Note: We are NOT creating a separate CodePatcherTool.
-# This agent will use write_to_file or replace_in_file via the orchestrator/CrewAI framework
-# based on instructions generated for the LLM.
 
 logger = get_logger(__name__)
 
-# TODO: Ensure the LLM instance used by CrewAI is correctly configured globally
-#       or passed explicitly during Agent initialization if needed.
-#       Referencing config.GENERATOR_EDITOR_MODEL.
 
 class CodeProcessorAgent:
     """
-    CrewAI Agent responsible for executing the conversion tasks defined in Step 4.
-    It generates/modifies Godot code based on a JSON task list, validates it,
-    and potentially handles internal refinement based on validation results.
-    Relies on the orchestrator to handle file writing/patching via tools.
+    CrewAI Agent responsible for processing a single conversion task item.
+    It generates/modifies Godot code based on context and task details,
+    determines the output format (full file or code block), and returns
+    a structured JSON report for the Orchestrator to handle file operations and validation.
     """
     def __init__(self):
-        # LLM configuration managed by CrewAI/global setup
-        logger.info(f"Initializing CodeProcessorAgent (LLM configuration managed by CrewAI/global setup using model like: {config.GENERATOR_EDITOR_MODEL})")
-        # Make the validator tool available to the agent instance if needed for direct calls,
-        # although CrewAI typically manages tool execution based on LLM requests.
-        self.validator_tool = validate_gdscript_syntax
+        # No tools are initialized here; the agent relies on context and generates a report.
+        logger.info(f"Initializing CodeProcessorAgent (LLM: {config.GENERATOR_EDITOR_MODEL})")
 
     def get_agent(self):
         """Creates and returns the CrewAI Agent instance."""
-        # Define the tools this agent *can request* CrewAI to use.
-        # The actual file writing/patching might be handled by the orchestrator interpreting
-        # the agent's output, or the agent could request write_to_file/replace_in_file directly
-        # if CrewAI is configured to allow agent access to these fundamental tools.
-        # For now, let's assume it can request validation.
-        available_tools = [self.validator_tool]
-
+        # No tools are passed to the agent itself.
         return Agent(
-            role=f"C++ to {config.TARGET_LANGUAGE} Code Translator",
+            role=f"SOLID-Focused C++ to {config.TARGET_LANGUAGE} Code Translator",
             goal=(
-                f"Execute a list of conversion tasks provided in JSON format. For each task: "
-                f"1. Analyze the task details (description, target file/element, source C++/elements, mapping notes). "
-                f"2. Use the provided C++ code context and mapping notes to generate the required {config.TARGET_LANGUAGE} code snippet or full file content. "
-                f"3. **Crucially, decide whether to output the *entire* modified target file content OR just the *specific code block/function* that needs changing.** Base this decision on the task's scope (e.g., creating a new file vs. modifying a function). Clearly indicate your choice. "
-                f"4. If outputting a specific block, ensure it's clearly delimited and includes necessary context (like function signature) for replacement. "
-                f"5. Optionally, request syntax validation of the generated {config.TARGET_LANGUAGE} code using the available tool. "
-                f"6. Report the generated code (full file or block) and validation status. If validation fails, attempt to fix the syntax error based on the feedback and re-validate (up to 2 attempts)."
+                f"Process a **single** conversion task item provided via context. The task details (description, target file/element, source C++/elements, mapping notes) and relevant context (C++ code, potentially existing Godot code) are given.\n"
+                f"Your goal is to generate clean, idiomatic, and syntactically plausible {config.TARGET_LANGUAGE} code for this single task, adhering to SOLID principles.\n"
+                f"1. Analyze the task details and context (including any existing Godot code provided).\n"
+                f"2. Generate the required {config.TARGET_LANGUAGE} code based on the task, context, and mapping notes.\n"
+                f"3. **Determine Output Format:** Decide if the generated code represents a 'FULL_FILE' (for new files or complete overwrites) or a 'CODE_BLOCK' (for modifying existing files).\n"
+                f"4. **Extract Search Block (if modifying):** If the output format is 'CODE_BLOCK', you MUST extract the exact original code block (`search_block`) from the existing Godot code provided in the context that the `generated_code` should replace.\n"
+                f"5. **Report Result:** Structure your final output as a **single JSON object** containing:\n"
+                f"   - `task_id`: (string) The ID from the input task item.\n"
+                f"   - `status`: (string) 'completed' if code generation was successful, 'failed' otherwise.\n"
+                f"   - `output_format`: (string) 'FULL_FILE' or 'CODE_BLOCK'.\n"
+                f"   - `generated_code`: (string) The generated {config.TARGET_LANGUAGE} code snippet or full file content.\n"
+                f"   - `search_block`: (string | null) The exact original code block to search for if `output_format` is 'CODE_BLOCK', otherwise null. **Must be accurate!**\n"
+                f"   - `target_godot_file`: (string) The target file path from the task item.\n"
+                f"   - `target_element`: (string) The target element from the task item.\n"
+                f"   - `validation_status`: (string) Optional: Indicate 'attempted_fix' if internal validation/fixing was tried, otherwise 'not_validated' or 'success' if confident. The orchestrator performs the definitive validation.\n"
+                f"   - `error_message`: (string | null) Description of any error during code generation or analysis."
             ),
             backstory=(
-                f"You are a meticulous programmer specialized in translating C++ code into idiomatic {config.TARGET_LANGUAGE} for the Godot Engine 4.x. "
-                f"You follow instructions precisely from a task list, referencing provided C++ snippets and mapping guidelines. "
-                f"You write clean, functional {config.TARGET_LANGUAGE} code. You understand the importance of syntax validation and can attempt basic corrections based on validator feedback. "
-                f"You clearly communicate whether your output is a complete file or a specific code block intended for replacement."
+                f"You are a meticulous programmer specialized in translating C++ code into idiomatic {config.TARGET_LANGUAGE} for Godot Engine 4.x, focusing on clean code and SOLID principles. "
+                f"You follow instructions precisely for a single task, referencing provided context (including existing target code if available). "
+                f"You generate clean, functional {config.TARGET_LANGUAGE} code. You determine if the output is a full file or a modification block. If it's a modification, you carefully extract the exact code block to be replaced (`search_block`) from the provided context. "
+                f"You **do not** interact with the file system directly. You report the generated code and necessary metadata (like `output_format` and `search_block`) in a structured JSON format for another process (the Orchestrator) to handle file writing, replacement, and final validation."
             ),
-            # llm=... # Let CrewAI handle LLM
+            # llm=... # Let CrewAI handle LLM based on Crew configuration
             verbose=True,
             allow_delegation=False, # Focuses on executing the defined tasks
-            # memory=True # Might be useful for the internal refinement loop on validation errors
-            tools=available_tools # Make the validator tool available
+            tools=[] # Agent does not use external tools directly
         )
-
-    # Note: The internal looping logic (iterating through JSON tasks, calling LLM,
-    # handling validation feedback) as described in concept.md (Option A)
-    # would typically be implemented within a custom Tool or directly within the
-    # Agent's execution logic if using a framework that allows overriding agent execution flow.
-    # In standard CrewAI, each task in the JSON list might need to become a separate CrewAI Task,
-    # which contradicts the concept's goal (Option B).
-    # For now, the Agent's goal reflects the intended *behavior*, but implementation details
-    # depend on how CrewAI tasks are structured by the orchestrator (main.cli.py).
-    # The orchestrator might need to loop through the JSON tasks and create CrewAI tasks dynamically,
-    # or a custom tool could encapsulate this loop.
-
-# Example instantiation (for testing or direct use if needed)
-# if __name__ == '__main__':
-#     agent_creator = CodeProcessorAgent()
-#     processor_agent = agent_creator.get_agent()
-#     print("CodeProcessorAgent created:")
-#     print(f"Role: {processor_agent.role}")
-#     print(f"Goal: {processor_agent.goal}")
-#     print(f"Tools: {[tool.name for tool in processor_agent.tools]}")

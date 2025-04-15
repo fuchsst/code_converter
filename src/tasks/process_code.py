@@ -9,145 +9,89 @@ logger = get_logger(__name__)
 
 class ProcessCodeTask:
     """
-    CrewAI Task definition for executing the C++ to Godot conversion tasks
-    based on a provided JSON task list.
+    CrewAI Task definition for executing a single C++ to Godot conversion task item.
     """
-    def create_task(self, agent, context: str, json_task_list: str):
+    def create_task(self, agent, context: str, task_item_json: str):
         """
-        Creates the CrewAI Task instance for processing the conversion tasks.
+        Creates the CrewAI Task instance for processing a single conversion task item.
 
         Args:
             agent (Agent): The CodeProcessorAgent instance responsible for this task.
             context (str): The context string containing relevant C++ source code,
-                           potentially existing Godot code, and mapping strategy notes,
-                           assembled by the ContextManager based on the JSON task list.
-            json_task_list (str): A string containing the JSON list of tasks generated in Step 4.
+                           potentially existing Godot code for the target file, and mapping notes,
+                           assembled by the Orchestrator specifically for this task item.
+            task_item_json (str): A string containing the JSON object for the single task item to be processed.
 
         Returns:
             Task: The CrewAI Task object.
         """
         logger.info(f"Creating ProcessCodeTask for agent: {agent.role}")
-        # This task guides the agent to process the *entire* list internally.
-        # The actual implementation of the internal loop depends on agent/tool design.
         return Task(
             description=(
-                "You are tasked with converting C++ code to Godot based on a detailed JSON task list. "
-                "The context provided contains relevant C++ source code and potentially existing Godot code snippets or mapping notes. "
-                f"The target language is {config.TARGET_LANGUAGE}.\n\n"
-                f"**Input JSON Task List:**\n```json\n{json_task_list}\n```\n\n"
-                "**Your Process:**\n"
-                "1.  Iterate through **each task** defined in the JSON list above.\n"
-                "2.  For **each task**, analyze its details (`description`, `target_godot_file`, `target_element`, `source_cpp_files`, `source_cpp_elements`, `mapping_notes`).\n"
-                "3.  Use the provided context (C++ code, existing Godot code, etc.) and the task's `mapping_notes` to generate the required {config.TARGET_LANGUAGE} code.\n"
-                "4.  **Determine Output Format:** Decide if you need to output the **entire content** for `target_godot_file` (e.g., for new files or significant changes) OR just a **specific code block/function** (e.g., for modifying an existing function). **Clearly state your choice ('FULL_FILE' or 'CODE_BLOCK')**.\n"
-                "5.  **If outputting a `CODE_BLOCK`:**\n"
-                "    - You **MUST** also provide the exact original code block (`search_block`) that the `generated_code` should replace.\n"
-                "    - Ensure `search_block` matches the original file content character-for-character, including indentation and line endings.\n"
-                "    - Ensure `generated_code` includes enough context (like the full function signature and body) for accurate replacement.\n"
-                "6.  **Validate (Optional but Recommended):** Request syntax validation for the `generated_code` using the `validate_gdscript_syntax` tool.\n"
-                "7.  **Attempt Fixes:** If validation fails, analyze the error message. Attempt to fix the syntax error (max 2 attempts per task) and re-validate.\n"
-                "8.  **Format Output for Each Task:** For each task processed, structure your response clearly, including:\n"
-                "    - The `task_id`.\n"
-                "    - The chosen output format (`output_format`: 'FULL_FILE' or 'CODE_BLOCK').\n"
-                "    - The generated code (`generated_code`: string containing the full file or code block).\n"
-                "    - **If `output_format` is `CODE_BLOCK`, include `search_block`: (string) The exact original code block to search for.**\n"
-                "    - Validation status (`validation_status`: 'success', 'failure', or 'skipped').\n"
-                "    - Validation errors (`validation_errors`: string or null).\n\n"
-                "Compile the results for **all** processed tasks into a single final output."
+                f"Process the **single conversion task item** detailed below, using the provided context. The target language is {config.TARGET_LANGUAGE}.\n\n"
+                f"**Input Task Item Details (JSON):**\n```json\n{task_item_json}\n```\n\n"
+                "**Your Process (as the CodeProcessorAgent):**\n"
+                "1.  Analyze the task details (from the JSON above) and the provided context (which includes relevant C++ code, mapping notes, and potentially existing Godot code for the target file).\n"
+                f"2.  Generate the required {config.TARGET_LANGUAGE} code based on the task, context, and mapping notes, adhering to SOLID principles.\n"
+                "3.  **Determine Output Format:** Decide if the generated code represents a 'FULL_FILE' (for new files or complete overwrites) or a 'CODE_BLOCK' (for modifying existing files).\n"
+                "4.  **Extract Search Block (if modifying):** If the output format is 'CODE_BLOCK', you MUST extract the exact original code block (`search_block`) from the existing Godot code provided in the context that the `generated_code` should replace. This `search_block` must be precise to allow the orchestrator's `Replace Content In File` tool to work correctly.\n"
+                "5.  **Report Result:** Structure your final output as a **single JSON object** containing the results of your processing, including `task_id`, `status` (completed/failed based on *your* ability to generate code and required info), `output_format`, `generated_code`, `search_block` (if applicable), `target_godot_file`, `target_element`, and optionally `validation_status` (your internal assessment) and `error_message`. **You do not perform file operations or final validation yourself.**"
             ),
             expected_output=(
-                "A structured report detailing the outcome for each task processed from the input JSON list. "
-                "This report should ideally be a **JSON list** where each object corresponds to a processed task and contains the following keys:\n"
-                "- `task_id`: (string) The ID of the task from the input list.\n"
-                "- `status`: (string) 'completed' or 'failed'.\n"
+                "A **single JSON object** summarizing the outcome of processing the task item. This object MUST include:\n"
+                "- `task_id`: (string) The ID from the input task item.\n"
+                "- `status`: (string) 'completed' if code generation and analysis (e.g., extracting search_block if needed) were successful from the agent's perspective, 'failed' otherwise.\n"
                 "- `output_format`: (string) 'FULL_FILE' or 'CODE_BLOCK'.\n"
-                "- `generated_code`: (string) The generated Godot code (either full file content or the specific block).\n"
-                "- `search_block`: (string | null) **Required if `output_format` is 'CODE_BLOCK'**. The exact original code block to search for. Null otherwise.\n"
-                "- `target_godot_file`: (string) The target file path from the task definition.\n"
-                "- `target_element`: (string) The target element (function, etc.) from the task definition.\n"
-                "- `validation_status`: (string) 'success', 'failure', or 'skipped'.\n"
-                "- `validation_errors`: (string | null) Error messages if validation failed, otherwise null.\n"
-                "- `error_message`: (string | null) Any error message if the task processing itself failed.\n\n"
-                "Example of the expected JSON list output:\n"
+                "- `generated_code`: (string) The generated {config.TARGET_LANGUAGE} code snippet or full file content.\n"
+                "- `search_block`: (string | null) The exact original code block to search for if `output_format` is 'CODE_BLOCK', otherwise null. **Must be accurate!**\n"
+                "- `target_godot_file`: (string) The target file path from the task item.\n"
+                "- `target_element`: (string) The target element from the task item.\n"
+                "- `validation_status`: (string) Optional: Indicate 'attempted_fix' if internal validation/fixing was tried, otherwise 'not_validated' or 'success' if confident. The orchestrator performs the definitive validation.\n"
+                "- `error_message`: (string | null) Description of any error during code generation or analysis.\n\n"
+                "Example Output (Success - Full File):\n"
                 "```json\n"
-                "[\n"
-                "  {\n"
-                "    \"task_id\": \"map_player_movement_001\",\n"
-                "    \"status\": \"completed\",\n"
-                "    \"output_format\": \"CODE_BLOCK\",\n"
-                "    \"search_block\": \"func _physics_process(delta):\\n    # Original movement logic here\\n    pass\\n\",\n"
-                "    \"generated_code\": \"func _physics_process(delta):\\n    var input_dir = Input.get_vector(\\\"left\\\", \\\"right\\\", \\\"up\\\", \\\"down\\\")\\n    velocity = input_dir * speed\\n    move_and_slide()\\n\",\n"
-                "    \"target_godot_file\": \"src/player/player.gd\",\n"
-                "    \"target_element\": \"_physics_process\",\n"
-                "    \"validation_status\": \"success\",\n"
-                "    \"validation_errors\": null,\n"
-                "    \"error_message\": null\n"
-                "  },\n"
-                "  {\n"
-                "    \"task_id\": \"map_player_jump_002\",\n"
-                "    \"status\": \"completed\",\n"
-                "    \"output_format\": \"CODE_BLOCK\",\n"
-                "    \"search_block\": \"func _input(event):\\n    pass\\n\",\n"
-                "    \"generated_code\": \"func _input(event):\\n    if event.is_action_pressed(\\\"jump\\\") and is_on_floor():\\n        velocity.y = JUMP_VELOCITY\\n\",\n"
-                "    \"target_godot_file\": \"src/player/player.gd\",\n"
-                "    \"target_element\": \"_input\",\n"
-                "    \"validation_status\": \"failure\",\n"
-                "    \"validation_errors\": \"player.gd:5: Parse Error: Unexpected token: Identifier:JUMP_VELOCITY\",\n"
-                "    \"error_message\": null\n"
-                "  },\n"
-                "  {\n"
-                "    \"task_id\": \"create_player_scene_003\",\n"
-                "    \"status\": \"completed\",\n"
-                "    \"output_format\": \"FULL_FILE\",\n"
-                "    \"search_block\": null,\n"
-                "    \"generated_code\": \"[gd_scene load_steps=2 format=3 uid=\\\"uid://abc123def456\\\"]\\n\\n[ext_resource type=\\\"Script\\\" path=\\\"res://src/player/player.gd\\\" id=\\\"1_xyz\\\"]\\n\\n[node name=\\\"Player\\\" type=\\\"CharacterBody3D\\\"]\\nscript = ExtResource(\\\"1_xyz\\\")\\n\",\n"
-                "    \"target_godot_file\": \"src/player/player.tscn\",\n"
-                "    \"target_element\": null,\n"
-                "    \"validation_status\": \"skipped\",\n"
-                "    \"validation_errors\": null,\n"
-                "    \"error_message\": null\n"
-                "  }\n"
-                "]\n"
+                "{\n"
+                "  \"task_id\": \"create_player_script_001\",\n"
+                "  \"status\": \"completed\",\n"
+                "  \"output_format\": \"FULL_FILE\",\n"
+                "  \"generated_code\": \"extends CharacterBody3D\\n\\nfunc _physics_process(delta):\\n    pass\\n\",\n"
+                "  \"search_block\": null,\n"
+                "  \"target_godot_file\": \"src/player/player.gd\",\n"
+                "  \"target_element\": \"player.gd\",\n"
+                "  \"validation_status\": \"success\",\n"
+                "  \"error_message\": null\n"
+                "}\n"
+                "```\n"
+                "Example Output (Success - Code Block):\n"
+                "```json\n"
+                "{\n"
+                "  \"task_id\": \"add_jump_func_002\",\n"
+                "  \"status\": \"completed\",\n"
+                "  \"output_format\": \"CODE_BLOCK\",\n"
+                "  \"generated_code\": \"func jump():\\n    velocity.y = JUMP_VELOCITY\",\n"
+                "  \"search_block\": \"func _physics_process(delta):\\n    pass\",\n"
+                "  \"target_godot_file\": \"src/player/player.gd\",\n"
+                "  \"target_element\": \"jump function\",\n"
+                "  \"validation_status\": \"success\",\n"
+                "  \"error_message\": null\n"
+                "}\n"
+                "```\n"
+                "Example Output (Failure - Agent Error):\n"
+                "```json\n"
+                "{\n"
+                "  \"task_id\": \"complex_state_machine_003\",\n"
+                "  \"status\": \"failed\",\n"
+                "  \"output_format\": null,\n"
+                "  \"generated_code\": null,\n"
+                "  \"search_block\": null,\n"
+                "  \"target_godot_file\": \"src/enemy/enemy_fsm.gd\",\n"
+                "  \"target_element\": \"update_state\",\n"
+                "  \"validation_status\": \"not_validated\",\n"
+                "  \"error_message\": \"Failed to understand complex C++ state logic.\"\n"
+                "}\n"
                 "```"
             ),
             agent=agent,
-            context=context, # Pass the assembled context directly to the task
-            output_json=True # Expecting the final compiled report as a JSON list
+            context=context,
+            output_json=True # Expecting the final report as a JSON object
         )
-
-# Example instantiation (for testing or direct use if needed)
-# if __name__ == '__main__':
-#     from agents.code_processor import CodeProcessorAgent # Need agent for task
-#     # Assume agent is initialized properly
-#     agent_creator = CodeProcessorAgent()
-#     processor_agent = agent_creator.get_agent()
-#
-#     # Dummy context and task list for testing
-#     test_context = """
-#     **File:** `src/player/player.h`
-#     ```cpp
-#     class CppPlayer {
-#         Vector3 position;
-#         Vector3 velocity;
-#         void updateMovement(float delta);
-#         void handleJump();
-#     };
-#     ```
-#     """
-#     test_task_list = json.dumps([
-#         {
-#             "task_id": "map_player_movement_001",
-#             "description": "Implement basic player movement in _physics_process based on CppPlayer::updateMovement",
-#             "target_godot_file": "src/player/player.gd",
-#             "target_element": "_physics_process",
-#             "source_cpp_files": ["src/player/player.cpp", "src/input/input_handler.h"],
-#             "source_cpp_elements": ["CppPlayer::updateMovement"],
-#             "mapping_notes": "Use Input.get_vector for direction. Apply velocity to CharacterBody3D.velocity. Call move_and_slide()."
-#         }
-#     ])
-#
-#     task_creator = ProcessCodeTask()
-#     process_task = task_creator.create_task(processor_agent, test_context, test_task_list)
-#     print("ProcessCodeTask created:")
-#     print(f"Description: {process_task.description}")
-#     print(f"Expected Output: {process_task.expected_output}")
