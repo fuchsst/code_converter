@@ -1,7 +1,7 @@
 # src/tasks/define_mapping.py
 from crewai import Task
-from logger_setup import get_logger
-import config
+from src.logger_setup import get_logger
+import src.config as config
 # Import agent definition if needed for type hinting or direct reference
 # from agents.mapping_definer import MappingDefinerAgent # Example
 

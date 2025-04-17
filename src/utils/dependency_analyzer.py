@@ -2,10 +2,26 @@
 import os
 import json
 import sys
-from logger_setup import get_logger
-import config # Assuming config.py defines CPP_SOURCE_DIR and INCLUDE_GRAPH_PATH
+from src.logger_setup import get_logger
+import src.config as config
 
 # --- Clang Imports ---
+llvm_base_path = r"C:\Program Files\LLVM" # Adjust if installed elsewhere
+
+# Construct the path to the bin directory
+llvm_libclang_dll = os.path.join(llvm_base_path, "bin", "libclang.dll")
+
+# Option 1: Set the directory containing libclang.dll
+print(f"Attempting to set libclang path to: {llvm_libclang_dll}")
+
+try:
+    clang.cindex.Config.set_library_file(llvm_libclang_dll)
+    print(f"Successfully set library path.")
+except Exception as e_setpath:
+    print(f"Error setting library path: {e_setpath}")
+    
+
+
 try:
     import clang.cindex
     # Optional: Set path to libclang if not found automatically
@@ -119,6 +135,7 @@ def generate_include_graph(source_dir, output_path, compile_commands_path=None):
         return False
 
     try:
+        clang.cindex.Config.set_library_file(llvm_libclang_dll)
         compile_db = clang.cindex.CompilationDatabase.fromDirectory(os.path.dirname(compile_commands_path))
         index = clang.cindex.Index.create()
     except clang.cindex.LibclangError as e:

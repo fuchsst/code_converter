@@ -2,13 +2,13 @@
 import subprocess
 import os
 import tempfile
-from logger_setup import get_logger
-import config
-from crewai_tools import tool # Import the tool decorator
+from src.logger_setup import get_logger
+import src.config as config
+
 
 logger = get_logger(__name__)
 
-@tool("GDScript Syntax Validator")
+
 def validate_gdscript_syntax(script_content: str, godot_exe_path: str = config.GODOT_EXECUTABLE_PATH) -> dict:
     """
     Validates the syntax of a given GDScript code string using the Godot executable's

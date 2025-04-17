@@ -1,7 +1,7 @@
 # src/agents/package_identifier.py
 from crewai import Agent
-from logger_setup import get_logger
-import config
+from src.logger_setup import get_logger
+import src.config as config
 # Assuming api_utils handles LLM configuration and calls
 # from core.api_utils import get_llm_client # Or however the LLM instance is managed
 

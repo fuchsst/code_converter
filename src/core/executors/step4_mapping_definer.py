@@ -9,7 +9,7 @@ from src.agents.mapping_definer import MappingDefinerAgent
 from src.tasks.define_mapping import DefineMappingTask
 from src.utils.parser_utils import parse_step4_output
 from crewai import Crew, Process
-from logger_setup import get_logger
+from src.logger_setup import get_logger
 
 logger = get_logger(__name__)
 
@@ -115,7 +115,7 @@ class Step4Executor(StepExecutor):
                     tasks=[task],
                     llm=mapper_llm, # Use the mapper LLM
                     process=Process.sequential,
-                    verbose=2 # Or use config value
+                    verbose=True
                 )
                 logger.info(f"Kicking off Crew for Step 4 (Package: {pkg_id}, Remapping: {is_remapping})...")
                 # Expecting combined Markdown + JSON string

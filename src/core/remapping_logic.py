@@ -1,7 +1,7 @@
 # src/core/remapping_logic.py
 from typing import List, Dict, Any
-from logger_setup import get_logger
-import config # Import config to potentially use thresholds
+from src.logger_setup import get_logger
+import src.config as config
 
 logger = get_logger(__name__)
 

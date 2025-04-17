@@ -1,7 +1,7 @@
 # config.py
 import os
 from dotenv import load_dotenv
-from logger_setup import get_logger
+from src.logger_setup import get_logger
 
 logger = get_logger(__name__)
 
@@ -16,22 +16,21 @@ if not GEMINI_API_KEY:
 
 # --- Model Configuration ---
 # Allows specifying different models for different agents
-# Format: "provider/model_name" (e.g., "google/gemini-1.5-pro-latest")
-DEFAULT_AGENT_MODEL = "google/gemini-2.0-flash-001" # Cost-effective default
+# Format: "provider/model_name" (e.g., "gemini/gemini-1.5-pro-latest")
+DEFAULT_AGENT_MODEL = "gemini/gemini-2.0-flash-001" # Cost-effective default
 # Environment variables (if set) should also follow the "provider/model_name" format.
-ORCHESTRATOR_MODEL = os.getenv("ORCHESTRATOR_MODEL", "google/gemini-2.5-pro-preview-03-25")
+ORCHESTRATOR_MODEL = os.getenv("ORCHESTRATOR_MODEL", "gemini/gemini-2.5-pro-preview-03-25")
 ANALYZER_MODEL = os.getenv("ANALYZER_MODEL", DEFAULT_AGENT_MODEL) # Defaults to the already formatted DEFAULT_AGENT_MODEL
-MAPPER_MODEL = os.getenv("MAPPER_MODEL", "google/gemini-2.5-pro-exp-03-25")
+MAPPER_MODEL = os.getenv("MAPPER_MODEL", "gemini/gemini-2.5-pro-exp-03-25")
 GENERATOR_EDITOR_MODEL = os.getenv("GENERATOR_EDITOR_MODEL", DEFAULT_AGENT_MODEL) # Defaults to the already formatted DEFAULT_AGENT_MODEL
-REVIEWER_MODEL = os.getenv("REVIEWER_MODEL", "google/gemini-2.5-pro-exp-03-25")
+REVIEWER_MODEL = os.getenv("REVIEWER_MODEL", "gemini/gemini-2.5-pro-exp-03-25")
 
 # --- Path Configuration ---
 # These should ideally be passed via CLI arguments, but provide defaults or load from env
 CPP_PROJECT_DIR = os.getenv("CPP_PROJECT_DIR", "data/cpp_project")
-GODOT_PROJECT_DIR = os.getenv("GODOT_PROJECT_DIR", "data/godot_project")
-GODOT_DOCS_DIR = os.getenv("GODOT_DOCS_DIR", "data/godot_docs")
-ANALYSIS_OUTPUT_DIR = os.getenv("ANALYSIS_OUTPUT_DIR", "analysis_output")
-VECTOR_STORE_DIR = os.getenv("VECTOR_STORE_DIR", "vector_store/index")
+GODOT_PROJECT_DIR = os.getenv("GODOT_PROJECT_DIR", "input/godot_project")
+GODOT_DOCS_DIR = os.getenv("GODOT_DOCS_DIR", "input/godot_docs")
+ANALYSIS_OUTPUT_DIR = os.getenv("ANALYSIS_OUTPUT_DIR", "output/analysis")
 LOG_DIR = os.getenv("LOG_DIR", "logs")
 
 # --- Tool Paths ---

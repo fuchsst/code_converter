@@ -8,7 +8,7 @@ from ..context_manager import ContextManager, count_tokens # Import count_tokens
 from src.agents.package_identifier import PackageIdentifierAgent
 from src.tasks.identify_packages import IdentifyWorkPackagesTask
 from crewai import Crew, Process
-from logger_setup import get_logger
+from src.logger_setup import get_logger
 
 logger = get_logger(__name__)
 
@@ -56,19 +56,24 @@ class Step2Executor(StepExecutor):
             # Get the LLM instance for the analyzer role
             analyzer_llm = self._get_llm('analyzer') # Assuming 'analyzer' is the key in llm_map
             if not analyzer_llm:
-                 raise ValueError("Analyzer LLM instance not found.")
+                  raise ValueError("Analyzer LLM instance not found.")
 
             # Instantiate Agent and Task
-            agent = PackageIdentifierAgent().get_agent()
-            task = IdentifyWorkPackagesTask().create_task(agent)
+            # Get the base agent definition
+            agent_definition = PackageIdentifierAgent().get_agent()
+            # Explicitly assign the configured LLM to the agent instance
+            agent_definition.llm = analyzer_llm
+            logger.debug(f"Assigned LLM {analyzer_llm.model} directly to agent {agent_definition.role}")
+            # Create the task using the agent with the LLM assigned
+            task = IdentifyWorkPackagesTask().create_task(agent_definition)
 
-            # Create and run Crew
+            # Create and run Crew, passing the agent with the LLM already set
             crew = Crew(
-                agents=[agent],
+                agents=[agent_definition], # Use the agent with the LLM assigned
                 tasks=[task],
-                llm=analyzer_llm, # Pass the specific LLM instance
+                # llm=analyzer_llm, # Passing LLM here might be redundant now, but keep for safety
                 process=Process.sequential,
-                verbose=2 # Or use config value
+                verbose=True
             )
             logger.info("Kicking off Crew for Step 2...")
             # Provide input directly to kickoff

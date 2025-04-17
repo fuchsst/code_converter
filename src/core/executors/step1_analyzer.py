@@ -4,8 +4,10 @@ from typing import Any, Dict, List, Optional
 from ..step_executor import StepExecutor
 from ..state_manager import StateManager
 from ..context_manager import ContextManager
-from src.utils.dependency_analyzer import generate_include_graph
-from logger_setup import get_logger
+# Use the new regex-based analyzer
+#from src.utils.dependency_analyzer import generate_include_graph
+from src.utils.dependency_analyzer_regex import generate_include_graph_regex
+from src.logger_setup import get_logger
 
 logger = get_logger(__name__)
 
@@ -37,11 +39,10 @@ class Step1Executor(StepExecutor):
         self.state_manager.update_workflow_status('running_step1')
         success = False
         try:
-            # Call the function from dependency_analyzer.py
-            analysis_success = generate_include_graph(self.cpp_project_dir, self.include_graph_path)
+            analysis_success = generate_include_graph_regex(self.cpp_project_dir, self.include_graph_path)
 
             if analysis_success:
-                logger.info("Step 1 dependency analysis completed successfully.")
+                logger.info("Step 1 dependency analysis (regex) completed successfully.")
                 # Reload graph data in ContextManager? Orchestrator should handle this after step execution.
                 self.state_manager.update_workflow_status('step1_complete')
                 success = True

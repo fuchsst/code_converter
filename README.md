@@ -26,6 +26,7 @@ The core philosophy emphasizes minimizing LLM API calls through deterministic pr
     pip install -r requirements.txt
     ```
 *   **Clang:** Libclang library and Python bindings (`pip install clang`). Ensure libclang is accessible in your system's PATH or configure its path if needed (see `src/utils/dependency_analyzer.py`).
+*   **libclang.dll** e.g. on Windows install LLVM (`choco install LLVM`)
 *   **C++ Project:**
     *   The source code of the C++ project you want to convert.
     *   A `compile_commands.json` file in the root of the C++ project directory. This is crucial for accurate dependency analysis by Clang. (CMake can generate this with `CMAKE_EXPORT_COMPILE_COMMANDS=ON`).

@@ -2,8 +2,8 @@
 import os
 import json
 from typing import Any, Dict, List, Optional, Type
-from logger_setup import get_logger
-import config
+from src.logger_setup import get_logger
+import src.config as config
 from .state_manager import StateManager
 from .context_manager import ContextManager
 from .remapping_logic import RemappingLogic
@@ -127,11 +127,46 @@ class Orchestrator:
             if model_name:
                 try:
                     # Ensure API key is set (CrewAI checks env vars by default)
-                    if "google" in model_name and not config.GEMINI_API_KEY:
+                    if "gemini" in model_name and not config.GEMINI_API_KEY:
                          logger.warning(f"GEMINI_API_KEY not set, LLM for role '{role}' ({model_name}) might fail.")
-                    # Add checks for other providers if used
+                     # Add checks for other providers if used
 
-                    llms[role] = LLM(model=model_name, **common_llm_params)
+                    # Explicitly pass API key based on provider because auto-detection seems unreliable here
+                    llm_params = common_llm_params.copy()
+                    api_key = None
+                    # Check config_dict first (which should have loaded from env/.env via src/config.py)
+                    if model_name.startswith(("gemini/", "google/")): # Keep google/ just in case
+                        api_key = self.config_dict.get("GEMINI_API_KEY")
+                        if not api_key:
+                             logger.warning(f"GEMINI_API_KEY not found in config for model {model_name}. Relying on env var fallback.")
+                             # As a fallback, check env var directly in case config loading missed it
+                             api_key = os.getenv("GEMINI_API_KEY")
+                     # Add elif blocks for other providers (Anthropic, Azure, etc.) if needed
+
+                    # Prepare parameters to pass directly to LiteLLM via litellm_params
+                    direct_litellm_params = {}
+                    if api_key:
+                         direct_litellm_params["api_key"] = api_key
+                         logger.debug(f"Explicitly providing api_key for {model_name} via litellm_params")
+                    else:
+                         logger.warning(f"Could not find explicit API key for {model_name} in config or environment. LiteLLM might fail.")
+
+                    # Determine base_url based on model
+                    base_url = None
+                    if model_name.startswith(("gemini/", "google/")):
+                        base_url = "https://generativelanguage.googleapis.com" # Add Gemini base URL
+                        logger.debug(f"Setting base_url for Gemini: {base_url}")
+                    # Add elif for other providers if needed
+
+                    # Pass common params and the specific litellm_params to crewai.LLM
+                    llms[role] = LLM(
+                        model=model_name,
+                        base_url=base_url,
+                        temperature=common_llm_params.get("temperature"),
+                        top_p=common_llm_params.get("top_p"),
+                        top_k=common_llm_params.get("top_k"),
+                        litellm_params=direct_litellm_params # Pass API key here
+                    )
                     logger.info(f"Initialized LLM for role '{role}': {model_name}")
                 except Exception as e:
                     logger.error(f"Failed to initialize LLM for role '{role}' ({model_name}): {e}", exc_info=True)

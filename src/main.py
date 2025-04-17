@@ -1,9 +1,8 @@
 # main.cli.py
 import fire
-import os
 import sys
-from logger_setup import setup_logging, get_logger
-import config # Load configuration defaults
+from src.logger_setup import setup_logging, get_logger
+import src.config as config
 from src.core.orchestrator import Orchestrator
 
 # Setup logging at the very beginning

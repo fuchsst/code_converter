@@ -1,10 +1,21 @@
 # src/tasks/identify_packages.py
 from crewai import Task
-from logger_setup import get_logger
+from src.logger_setup import get_logger
+from pydantic import BaseModel, Field
+from typing import List, Dict
 # Import agent definition if needed for type hinting or direct reference
 # from agents.package_identifier import PackageIdentifierAgent # Example
 
 logger = get_logger(__name__)
+
+# Define Pydantic Models for structured output
+class PackageDetails(BaseModel):
+    description: str = Field(..., description="A brief string describing the package's likely purpose.")
+    files: List[str] = Field(..., description="A list of file paths (relative to the project root) belonging to this package.")
+
+class WorkPackagesOutput(BaseModel):
+    packages: Dict[str, PackageDetails] = Field(..., description="A dictionary where keys are unique package identifiers (e.g., 'package_1', 'core_utils') and values are objects containing package description and file list.")
+
 
 class IdentifyWorkPackagesTask:
     """
@@ -31,27 +42,29 @@ class IdentifyWorkPackagesTask:
                 "Each package should represent a manageable unit for conversion (e.g., 5-20 related files, depending on complexity). "
                 "Provide a brief 'description' for each identified package explaining its likely purpose."
             ),
-            expected_output=(
-                "A JSON object where keys are unique package identifiers (e.g., 'package_1', 'core_utils', 'ai_system') "
+            expected_output=( # Keep this for LLM guidance, but Pydantic model enforces structure
+                "A JSON object structured according to the WorkPackagesOutput Pydantic model. Keys are unique package identifiers "
                 "and values are objects containing: \n"
                 "1. 'description': A brief string describing the package's likely purpose.\n"
                 "2. 'files': A list of file paths (relative to the project root) belonging to this package."
                 "\nExample:\n"
                 "{\n"
-                "  \"audio_subsystem\": {\n"
-                "    \"description\": \"Handles sound loading and playback.\",\n"
-                "    \"files\": [\"src/audio/manager.cpp\", \"src/audio/sound.h\", ...]\n"
-                "  },\n"
-                "  \"rendering_core\": {\n"
-                "    \"description\": \"Core rendering pipeline components.\",\n"
-                "    \"files\": [\"src/render/renderer.cpp\", \"src/render/shader.h\", ...]\n"
+                "  \"packages\": {\n" # Note: Added 'packages' key due to wrapper model
+                "    \"audio_subsystem\": {\n"
+                "      \"description\": \"Handles sound loading and playback.\",\n"
+                "      \"files\": [\"src/audio/manager.cpp\", \"src/audio/sound.h\", ...]\n"
+                "    },\n"
+                "    \"rendering_core\": {\n"
+                "      \"description\": \"Core rendering pipeline components.\",\n"
+                "      \"files\": [\"src/render/renderer.cpp\", \"src/render/shader.h\", ...]\n"
+                "    }\n"
                 "  }\n"
                 "}"
             ),
             agent=agent,
             # inputs={'include_graph_json': '...'} # Actual input provided during crew kickoff
             # context=None # Context is typically managed externally or via agent memory
-            output_json=True
+            output_pydantic=WorkPackagesOutput
             # output_file="analysis_results/work_packages.json" # CrewAI can optionally save output
         )
 

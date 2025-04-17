@@ -1,8 +1,8 @@
 # src/agents/code_processor.py
 from crewai import Agent
 # Removed tool imports: FileReadTool, FileWriteTool, validate_gdscript_syntax, replace_content_in_file
-from logger_setup import get_logger
-import config
+from src.logger_setup import get_logger
+import src.config as config
 
 logger = get_logger(__name__)
 

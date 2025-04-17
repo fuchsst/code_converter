@@ -8,7 +8,7 @@ from ..core.tool_interfaces import IFileWriter, IFileReplacer, IFileReader, ISyn
 from .godot_validator_tool import validate_gdscript_syntax
 # Import standard CrewAI tools for read/write
 from crewai_tools import FileWriterTool, FileReadTool
-from logger_setup import get_logger
+from src.logger_setup import get_logger
 
 logger = get_logger(__name__)
 

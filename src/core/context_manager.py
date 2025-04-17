@@ -2,8 +2,8 @@
 import os
 import json
 import re
-from logger_setup import get_logger
-import config
+from src.logger_setup import get_logger
+import src.config as config
 import tiktoken # Added for token counting
 
 logger = get_logger(__name__)
@@ -103,11 +103,10 @@ def count_tokens(text: str, model_name: str = "cl100k_base") -> int:
 
     if tokenizer:
         try:
-            # TODO: Map model_name to specific tokenizer if needed in the future
-            # For now, using the default initialized tokenizer
+            # Using the default initialized tokenizer (cl100k_base)
             tokens = tokenizer.encode(text)
             token_count = len(tokens)
-            # logger.debug(f"Counted tokens using tiktoken ({model_name} -> cl100k_base): {token_count}")
+            # logger.debug(f"Counted tokens using tiktoken ({model_name} -> cl100k_base): {token_count}") # Kept debug log for reference
             return token_count
         except Exception as e:
             logger.error(f"Tiktoken encode failed: {e}. Falling back to character count.", exc_info=True)

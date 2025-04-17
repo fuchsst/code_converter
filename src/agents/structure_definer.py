@@ -1,7 +1,7 @@
 # src/agents/structure_definer.py
 from crewai import Agent
-from logger_setup import get_logger
-import config
+from src.logger_setup import get_logger
+import src.config as config
 # Assuming api_utils handles LLM configuration and calls via CrewAI's mechanism
 
 logger = get_logger(__name__)

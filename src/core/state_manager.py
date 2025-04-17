@@ -1,7 +1,7 @@
 # src/core/state_manager.py
 import os
 import json
-from logger_setup import get_logger
+from src.logger_setup import get_logger
 from typing import Dict, Any
 
 logger = get_logger(__name__)

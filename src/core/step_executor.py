@@ -5,7 +5,7 @@ from .state_manager import StateManager
 from .context_manager import ContextManager
 from .tool_interfaces import IFileWriter, IFileReplacer, IFileReader, ISyntaxValidator
 from crewai.llm import LLM # Import CrewAI's LLM abstraction
-from logger_setup import get_logger
+from src.logger_setup import get_logger
 
 logger = get_logger(__name__)
 

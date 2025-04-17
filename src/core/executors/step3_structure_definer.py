@@ -8,7 +8,7 @@ from ..context_manager import ContextManager
 from src.agents.structure_definer import StructureDefinerAgent
 from src.tasks.define_structure import DefineStructureTask
 from crewai import Crew, Process
-from logger_setup import get_logger
+from src.logger_setup import get_logger
 
 logger = get_logger(__name__)
 
@@ -89,7 +89,7 @@ class Step3Executor(StepExecutor):
                     tasks=[task],
                     llm=mapper_llm, # Use the mapper LLM
                     process=Process.sequential,
-                    verbose=2 # Or use config value
+                    verbose=True
                 )
                 logger.info(f"Kicking off Crew for Step 3 (Package: {pkg_id})...")
                 # Expecting JSON object directly due to output_json=True in the task

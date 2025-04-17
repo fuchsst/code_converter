@@ -150,7 +150,7 @@ cython_debug/
 out/
 
 # Project specific
-input_code/
+input/
 output/
 logs/
 .DS_Store

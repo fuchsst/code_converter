@@ -1,7 +1,7 @@
 # src/tasks/define_structure.py
 from crewai import Task
-import config
-from logger_setup import get_logger
+import src.config as config
+from src.logger_setup import get_logger
 # Import agent definition if needed for type hinting or direct reference
 # from agents.structure_definer import StructureDefinerAgent # Example
 

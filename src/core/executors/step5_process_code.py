@@ -10,7 +10,7 @@ from ..tool_interfaces import IFileWriter, IFileReplacer, IFileReader, ISyntaxVa
 from src.agents.code_processor import CodeProcessorAgent
 from src.tasks.process_code import ProcessCodeTask
 from crewai import Crew, Process
-from logger_setup import get_logger
+from src.logger_setup import get_logger
 
 logger = get_logger(__name__)
 
@@ -150,7 +150,7 @@ class Step5Executor(StepExecutor):
                             tasks=[process_task],
                             llm=generator_llm, # Use the generator LLM
                             process=Process.sequential,
-                            verbose=1 # Or use config value
+                            verbose=False
                         )
                         logger.info(f"Kicking off Crew for Task Item {task_id}...")
                         agent_report = crew.kickoff() # Agent handles internal retries

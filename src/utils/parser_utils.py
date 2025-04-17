@@ -1,6 +1,6 @@
 # src/utils/parser_utils.py
 import json
-from logger_setup import get_logger
+from src.logger_setup import get_logger
 
 logger = get_logger(__name__)
 
