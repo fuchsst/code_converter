@@ -1,5 +1,5 @@
 # src/agents/code_processor.py
-from crewai import Agent
+from crewai import Agent, BaseLLM
 # Removed tool imports: FileReadTool, FileWriteTool, validate_gdscript_syntax, replace_content_in_file
 from src.logger_setup import get_logger
 import src.config as config
@@ -15,11 +15,15 @@ class CodeProcessorAgent:
     a structured JSON report for the Orchestrator to handle file operations and validation.
     """
     def __init__(self):
-        # No tools are initialized here; the agent relies on context and generates a report.
-        logger.info(f"Initializing CodeProcessorAgent (LLM: {config.GENERATOR_EDITOR_MODEL})")
+        logger.info(f"Initializing CodeProcessorAgent (LLM instance will be provided)")
 
-    def get_agent(self):
-        """Creates and returns the CrewAI Agent instance."""
+    def get_agent(self, llm_instance: BaseLLM = None):
+        """
+        Creates and returns the CrewAI Agent instance.
+
+        Args:
+            llm_instance: An optional pre-configured LLM instance to use.
+        """
         # No tools are passed to the agent itself.
         return Agent(
             role=f"SOLID-Focused C++ to {config.TARGET_LANGUAGE} Code Translator",
@@ -47,7 +51,7 @@ class CodeProcessorAgent:
                 f"You generate clean, functional {config.TARGET_LANGUAGE} code. You determine if the output is a full file or a modification block. If it's a modification, you carefully extract the exact code block to be replaced (`search_block`) from the provided context. "
                 f"You **do not** interact with the file system directly. You report the generated code and necessary metadata (like `output_format` and `search_block`) in a structured JSON format for another process (the Orchestrator) to handle file writing, replacement, and final validation."
             ),
-            # llm=... # Let CrewAI handle LLM based on Crew configuration
+            llm=llm_instance,
             verbose=True,
             allow_delegation=False, # Focuses on executing the defined tasks
             tools=[] # Agent does not use external tools directly

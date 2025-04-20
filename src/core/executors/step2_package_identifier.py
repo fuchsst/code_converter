@@ -1,109 +1,549 @@
 # src/core/executors/step2_package_identifier.py
-import os
-import json
-from typing import Any, Dict, List, Optional
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, Type
+import networkx as nx
+from crewai import Crew, Process
+
 from ..step_executor import StepExecutor
 from ..state_manager import StateManager
-from ..context_manager import ContextManager, count_tokens # Import count_tokens
-from src.agents.package_identifier import PackageIdentifierAgent
-from src.tasks.identify_packages import IdentifyWorkPackagesTask
-from crewai import Crew, Process
+from ..context_manager import ContextManager, count_tokens, read_file_content
 from src.logger_setup import get_logger
+import src.config as global_config # Use alias for clarity
+
+# Import new partitioning and agent/task components
+from src.partitioning.louvain_partitioner import LouvainPartitioner
+from src.partitioning.balance_refiner import refine_partitions_for_balance, calculate_partition_stats
+from src.agents.package_describer import PackageDescriberAgent
+from src.tasks.describe_package import DescribePackageTask
+from src.agents.package_refiner import PackageRefinementAgent
+from src.tasks.refine_descriptions import RefineDescriptionsTask
+from crewai import LLM as CrewAI_LLM # Alias default LLM
+from src.llms.google_genai_llm import GoogleGenAI_LLM
+from src.utils.json_utils import parse_json_from_string
 
 logger = get_logger(__name__)
 
+# --- Constants from Config ---
+# These might be overridden by self.config in methods
+LLM_DESC_MAX_TOKENS_RATIO = global_config.LLM_DESC_MAX_TOKENS_RATIO
+LLM_PROMPT_BUFFER = global_config.PROMPT_TOKEN_BUFFER
+LLM_CALL_RETRIES = global_config.LLM_CALL_RETRIES
+
 class Step2Executor(StepExecutor):
-    """Executes Step 2: Work Package Identification."""
+    """
+    Executes Step 2: Work Package Identification & Description.
+    Uses Louvain for initial partitioning, refines for balance,
+    and uses an LLM agent for description generation.
+    Handles persistence via ContextManager.
+    """
+    def __init__(self,
+                 state_manager: StateManager,
+                 context_manager: ContextManager,
+                 config: Dict[str, Any],
+                 llm_configs: Dict[str, Dict[str, Any]],
+                 tools: Dict[Type, Any]):
+        super().__init__(state_manager, context_manager, config, llm_configs, tools)
+        # Store cpp_source_dir as an absolute Path object
+        # Ensure config is accessed via self.config hereafter
+        self.cpp_source_dir = Path(self.config.get("CPP_PROJECT_DIR", "data/cpp_project")).resolve()
+        self.partitioner = LouvainPartitioner() # Instantiate the chosen partitioner
 
-    def execute(self, package_ids: Optional[List[str]] = None, **kwargs) -> bool:
+    # --- Graph Building (Remains mostly the same) ---
+    def _build_dependency_graph(self, include_graph_data: Dict[str, List[Dict[str, Any]]]) -> nx.DiGraph:
+        """Builds a NetworkX DiGraph from the include dependency data."""
+        G = nx.DiGraph()
+        normalized_graph_data = {}
+        all_files_in_graph = set()
+
+        for k, v_list in include_graph_data.items():
+            norm_k = k.replace('\\', '/')
+            all_files_in_graph.add(norm_k)
+            normalized_includes = []
+            if isinstance(v_list, list):
+                for item in v_list:
+                    if isinstance(item, dict) and 'path' in item:
+                        norm_path = item['path'].replace('\\', '/')
+                        # Ensure weight is numeric, default to 1.0
+                        weight = item.get("weight", 1.0)
+                        try:
+                            weight = float(weight)
+                        except (ValueError, TypeError):
+                            logger.warning(f"Invalid weight '{weight}' for include {norm_path} in {norm_k}. Defaulting to 1.0.")
+                            weight = 1.0
+                        normalized_includes.append({
+                            "path": norm_path,
+                            "weight": weight
+                        })
+                        all_files_in_graph.add(norm_path)
+                    else:
+                        logger.warning(f"Invalid include item format for {norm_k}: {item}")
+            normalized_graph_data[norm_k] = normalized_includes
+
+        # Add all nodes first
+        for file_path in all_files_in_graph:
+            G.add_node(file_path)
+
+        # Add edges based on includes
+        for file_path, includes_with_weights in normalized_graph_data.items():
+            if file_path not in G: continue
+            for include_item in includes_with_weights:
+                included_file = include_item["path"]
+                weight = include_item["weight"]
+                if included_file in G:
+                    G.add_edge(file_path, included_file, weight=weight)
+
+        logger.info(f"Built dependency DiGraph with {G.number_of_nodes()} nodes and {G.number_of_edges()} edges.")
+        return G
+
+    # --- Node Weight Calculation ---
+    def _get_node_weights(self, graph_nodes: List[str]) -> Dict[str, int]:
+        """Calculates token counts for all nodes in the graph."""
+        file_token_counts: Dict[str, int] = {}
+        logger.info("Pre-calculating token counts for all graph nodes...")
+        for node in graph_nodes:
+            abs_path_str = str(self.cpp_source_dir / node)
+            # Use cleaned content for token counting, consistent with LLM context
+            content = read_file_content(abs_path_str, remove_comments_blank_lines=True)
+            file_token_counts[node] = count_tokens(content) if content else 0
+        logger.info("Finished pre-calculating token counts.")
+        return file_token_counts
+
+    # --- Context Assembly for Description Task ---
+    def _assemble_description_context(self, package_files: List[str], token_limit: int) -> Tuple[str, str]:
         """
-        Runs the work package identification using an LLM.
-
-        Args:
-            package_ids: Not used in this step.
-            **kwargs: Not used in this step.
+        Assembles the context string for the DescribePackageTask, trying full content,
+        then interfaces, then just paths, respecting the token limit.
 
         Returns:
-            bool: True if package identification was successful, False otherwise.
+            Tuple[str, str]: (context_string, content_type_used)
         """
-        logger.info("--- Starting Step 2 Execution: Identify Work Packages ---")
+        content_map = {}
+        total_content_tokens = 0
+        context_str = ""
+        content_type_used = "paths" # Default
+
+        # Try full cleaned content
+        for file_path in package_files:
+            abs_path_str = str(self.cpp_source_dir / file_path)
+            content = read_file_content(abs_path_str, remove_comments_blank_lines=True)
+            if content is not None:
+                content_map[file_path] = content
+                total_content_tokens += count_tokens(content)
+            else:
+                content_map[file_path] = f"// Error: Could not read file {file_path}"
+                total_content_tokens += count_tokens(content_map[file_path])
+
+        if total_content_tokens <= token_limit:
+            logger.debug(f"Using full cleaned content ({total_content_tokens} tokens) for package description.")
+            parts = [f"// File: {fp}\n{content_map[fp]}" for fp in package_files]
+            context_str = "\n\n".join(parts)
+            content_type_used = "full content"
+            return context_str, content_type_used
+
+        # Fallback to file paths only if full content exceeds the limit
+        logger.warning(f"Full content ({total_content_tokens} tokens) exceeds limit ({token_limit}). Using file paths only.")
+        context_str = "// File Paths Only:\n" + "\n".join(package_files)
+        content_type_used = "paths"
+        return context_str, content_type_used
+
+
+    # --- Main Execution Logic ---
+    def execute(self, package_ids: Optional[List[str]] = None, **kwargs) -> bool:
+        """
+        Runs Step 2: Identifies packages using Louvain, refines for balance,
+        and generates descriptions using a CrewAI agent.
+        """
+        logger.info("--- Starting Step 2 Execution: Package Identification & Description ---")
         self.state_manager.update_workflow_status('running_step2')
         success = False
+        resuming_from_file = False
+        # Use package data loaded by ContextManager during its initialization
+        # Make a copy to modify during execution, save back via ContextManager
+        current_packages_data = self.context_manager.packages_data.copy()
+        node_weights = {} # Initialize node_weights
 
-        # Load include graph data via ContextManager (which loads it on init)
-        # Or should Orchestrator pass it explicitly? Let's assume ContextManager holds it.
-        # Need to ensure ContextManager reloads if Step 1 just ran.
-        # For now, assume graph is available via context_manager.include_graph
+        if current_packages_data: # Check if the loaded data is not empty
+            logger.info("Resuming package description using data from ContextManager.")
+            resuming_from_file = True
+            # Need node weights even when resuming for 'total_tokens'
+            all_files_in_loaded_packages = set()
+            for pkg_data in current_packages_data.values():
+                if isinstance(pkg_data.get("files"), list):
+                    all_files_in_loaded_packages.update(pkg_data["files"])
+            if not all_files_in_loaded_packages:
+                 logger.warning("Loaded packages data contains no files. Cannot calculate node weights.")
+            else:
+                 logger.info("Calculating node weights for files in loaded packages...")
+                 node_weights = self._get_node_weights(list(all_files_in_loaded_packages))
+        else:
+            logger.info("No valid existing package data found in ContextManager. Performing full partitioning.")
+            resuming_from_file = False
+            # Proceed with graph building and partitioning
+
         include_graph_data = self.context_manager.include_graph
-        if not include_graph_data:
-             logger.error("Include graph data is missing from ContextManager. Cannot run Step 2. Run Step 1 first.")
-             self.state_manager.update_workflow_status('failed_step2', "Include graph data missing for Step 2.")
-             return False
+        if not include_graph_data and not resuming_from_file: # Only fail if not resuming and graph is needed
+            logger.error("Include graph data is missing and not resuming. Cannot run Step 2.")
+            self.state_manager.update_workflow_status('failed_step2', "Include graph data missing.")
+            return False
 
         try:
-            # Prepare context (just the graph JSON string)
-            include_graph_json = json.dumps(include_graph_data, indent=2)
+            if not resuming_from_file:
+                # --- Steps 1-4: Only run if not resuming ---
+                logger.info("Performing graph building and partitioning...")
+                # 1. Build Graph
+                dependency_graph = self._build_dependency_graph(include_graph_data)
+                if not dependency_graph.nodes:
+                    logger.warning("Dependency graph has no nodes after building. Skipping package identification.")
+                    self.context_manager.save_packages_data({}) # Save empty via ContextManager
+                    self.state_manager.set_packages({"packages": {}})
+                    self.state_manager.update_workflow_status('step2_complete')
+                    return True
 
-            # Check token count of the graph JSON before sending to agent
-            graph_token_limit = int(self.config.get("MAX_CONTEXT_TOKENS", 800000) * 0.5) # Example: 50% limit for graph
-            graph_tokens = count_tokens(include_graph_json)
-            logger.debug(f"Include graph JSON token count: {graph_tokens} (Limit: {graph_token_limit})")
-            if graph_tokens > graph_token_limit:
-                error_msg = f"Include graph JSON ({graph_tokens} tokens) exceeds the estimated limit ({graph_token_limit}) for Step 2 context."
-                logger.error(error_msg)
-                raise ValueError(error_msg) # Error out as per concept constraints
+                # 2. Calculate Node Weights (Token Counts)
+                node_weights = self._get_node_weights(list(dependency_graph.nodes()))
 
-            # Get the LLM instance for the analyzer role
-            analyzer_llm = self._get_llm('analyzer') # Assuming 'analyzer' is the key in llm_map
-            if not analyzer_llm:
-                  raise ValueError("Analyzer LLM instance not found.")
+                # 3. Initial Partitioning (Louvain)
+                initial_partitions = self.partitioner.partition(dependency_graph, node_weights, self.config)
+                if not initial_partitions:
+                    logger.warning("Initial Louvain partitioning resulted in zero communities. Skipping refinement and description.")
+                    self.context_manager.save_packages_data({}) # Save empty via ContextManager
+                    self.state_manager.set_packages({"packages": {}})
+                    self.state_manager.update_workflow_status('step2_complete')
+                    return True
 
-            # Instantiate Agent and Task
-            # Get the base agent definition
-            agent_definition = PackageIdentifierAgent().get_agent()
-            # Explicitly assign the configured LLM to the agent instance
-            agent_definition.llm = analyzer_llm
-            logger.debug(f"Assigned LLM {analyzer_llm.model} directly to agent {agent_definition.role}")
-            # Create the task using the agent with the LLM assigned
-            task = IdentifyWorkPackagesTask().create_task(agent_definition)
+                # 4. Refine Partitions for Balance
+                balanced_partitions = refine_partitions_for_balance(
+                    initial_partitions, node_weights, dependency_graph, self.config
+                )
+                if not balanced_partitions:
+                    logger.warning("Balance refinement resulted in zero valid packages. Using initial Louvain partitions (if any).")
+                    min_files = self.config.get('MIN_PACKAGE_SIZE_FILES', global_config.MIN_PACKAGE_SIZE_FILES)
+                    balanced_partitions = {i: sorted(nodes) for i, nodes in enumerate(initial_partitions.values()) if len(nodes) >= min_files}
+                    if not balanced_partitions:
+                        logger.error("Both initial partitioning and refinement yielded no valid packages.")
+                        self.context_manager.save_packages_data({}) # Save empty via ContextManager
+                        self.state_manager.set_packages({"packages": {}})
+                        self.state_manager.update_workflow_status('step2_complete') # Or failed? Let's say complete but empty.
+                        return True
 
-            # Create and run Crew, passing the agent with the LLM already set
-            crew = Crew(
-                agents=[agent_definition], # Use the agent with the LLM assigned
-                tasks=[task],
-                # llm=analyzer_llm, # Passing LLM here might be redundant now, but keep for safety
-                process=Process.sequential,
-                verbose=True
-            )
-            logger.info("Kicking off Crew for Step 2...")
-            # Provide input directly to kickoff
-            result = crew.kickoff(inputs={'include_graph_json': include_graph_json})
+                # --- Prepare initial package structure for saving and processing ---
+                logger.info("Preparing initial package structure from balanced partitions.")
+                current_packages_data = {} # Reset here, as we are creating it fresh
+                for i, files in balanced_partitions.items():
+                    package_name = f"package_{i+1}" # Start naming from package_1
+                    current_packages_data[package_name] = {
+                        "description": None, # Initialize description as None
+                        "file_roles": [], # Initialize roles as empty list
+                        "files": files,
+                        "total_tokens": sum(node_weights.get(f, 0) for f in files)
+                    }
+                # --- Save initial structure before starting descriptions ---
+                logger.info("Saving initial package structure via ContextManager...")
+                self.context_manager.save_packages_data(current_packages_data)
+                # Ensure the executor's view is consistent after saving
+                # current_packages_data = self.context_manager.packages_data # Already updated by save method
 
-            logger.info("Step 2 Crew finished.")
-            logger.debug(f"Step 2 Raw Result:\n{result}")
+            # --- Step 5: Get LLM Descriptions (runs whether resuming or not) ---
+            final_packages_output = {} # This will accumulate results as we go
+            analyzer_llm_config = self._get_llm_config('analyzer') # Get config dict
+            analyzer_llm_instance = None # Initialize LLM instance variable
 
-            # Process result (expected to be JSON string or dict if output_json worked)
-            if isinstance(result, str):
+            if analyzer_llm_config:
+                model_identifier = analyzer_llm_config.get("model", "")
                 try:
-                    parsed_packages = json.loads(result)
-                except json.JSONDecodeError as e:
-                    logger.error(f"Failed to parse JSON output from Step 2: {e}")
-                    logger.debug(f"Raw output: {result}")
-                    raise ValueError(f"Step 2 LLM output was not valid JSON: {e}")
-            elif isinstance(result, dict):
-                 parsed_packages = result
+                    if model_identifier.startswith("gemini/"):
+                        analyzer_llm_instance = GoogleGenAI_LLM(**analyzer_llm_config)
+                        logger.info(f"Instantiated custom GoogleGenAI_LLM for role 'analyzer': {model_identifier}")
+                    else:
+                        analyzer_llm_instance = CrewAI_LLM(**analyzer_llm_config)
+                        logger.info(f"Instantiated default crewai.LLM for role 'analyzer': {model_identifier}")
+                except Exception as e:
+                    logger.error(f"Failed to instantiate LLM for role 'analyzer' ({model_identifier}): {e}", exc_info=True)
+                    analyzer_llm_instance = None # Explicitly set to None on error
             else:
-                 logger.error(f"Unexpected result type from Step 2 Crew: {type(result)}")
-                 raise TypeError("Step 2 result was not string or dict.")
+                logger.error("Analyzer LLM configuration ('analyzer') not found. Cannot generate package descriptions.")
+                analyzer_llm_instance = None # Explicitly set to None if config is missing
 
-            # Validate basic structure
-            if not isinstance(parsed_packages, dict):
-                 raise TypeError("Step 2 result JSON is not a dictionary.")
+            # --- Now, check if the LLM instance is available ---
+            if not analyzer_llm_instance:
+                logger.warning("Proceeding without LLM-generated package descriptions due to configuration/instantiation issues.")
+                # Fill in placeholders for any missing descriptions
+                needs_save = False
+                for pkg_name, pkg_data in current_packages_data.items():
+                    # Check if description is missing or is a known placeholder/error
+                    invalid_descs = {None, "", "Error: Failed to generate description", "N/A (LLM 'analyzer' not configured)", "N/A (LLM 'analyzer' not available)"}
+                    if pkg_data.get("description") in invalid_descs:
+                         pkg_data["description"] = "N/A (LLM 'analyzer' not available)"
+                         pkg_data["file_roles"] = [{"file_path": f, "role": "N/A"} for f in pkg_data.get("files", [])]
+                         needs_save = True
+                # Use the potentially updated data as the final output in this case
+                final_packages_output = current_packages_data
+                # Save the state with placeholders if changes were made
+                if needs_save:
+                     logger.info("Saving package data with LLM N/A placeholders via ContextManager...")
+                     self.context_manager.save_packages_data(final_packages_output)
 
-            # Update state with packages using StateManager
-            self.state_manager.set_packages(parsed_packages)
-            package_count = len(self.state_manager.get_all_packages())
-            logger.info(f"Step 2 identified {package_count} work packages.")
+            else: # LLM instance IS available
+                 logger.info("LLM instance available. Proceeding with description generation...")
+                 # Setup agent and task creator
+                 describer_agent_creator = PackageDescriberAgent()
+                 describer_agent = describer_agent_creator.get_agent(llm_instance=analyzer_llm_instance)
+                 task_creator = DescribePackageTask()
+                 max_retries = self.config.get("LLM_CALL_RETRIES", LLM_CALL_RETRIES)
+
+                 # Determine token limit for description context
+                 llm_max_tokens = self.config.get("MAX_CONTEXT_TOKENS", global_config.MAX_CONTEXT_TOKENS)
+                 if llm_max_tokens is None:
+                     llm_max_tokens = 200_000 # Hardcoded fallback
+                     logger.warning(f"config.MAX_CONTEXT_TOKENS was None, using hardcoded default: {llm_max_tokens}")
+                 desc_token_limit = int(llm_max_tokens * LLM_DESC_MAX_TOKENS_RATIO) - LLM_PROMPT_BUFFER
+
+                 # --- Iterate through packages in the current data (loaded or newly created) ---
+                 total_packages = len(current_packages_data)
+                 processed_count = 0
+                 # Iterate over a copy of items to allow modification of the original dict
+                 packages_to_process = list(current_packages_data.items())
+
+                 for package_name, package_data in packages_to_process:
+                     processed_count += 1
+                     files = package_data.get("files", [])
+                     if not files:
+                          logger.warning(f"Skipping package {package_name} as it has no files listed.")
+                          # Ensure it's included in final output even if skipped
+                          if package_name not in final_packages_output:
+                              final_packages_output[package_name] = package_data
+                          continue
+
+                     logger.info(f"Processing package {processed_count}/{total_packages}: {package_name} ({len(files)} files)...")
+
+                     # --- Check if description already exists ---
+                     existing_desc = package_data.get("description")
+                     # Define known invalid/placeholder descriptions
+                     invalid_descs = {None, "", "Error: Failed to generate description", "N/A (LLM 'analyzer' not configured)", "N/A (LLM 'analyzer' not available)"}
+                     if existing_desc not in invalid_descs:
+                          logger.info(f"Description already exists for {package_name}. Skipping LLM call.")
+                          # Ensure it's included in final output
+                          if package_name not in final_packages_output:
+                              final_packages_output[package_name] = package_data
+                          continue # Move to the next package
+
+                     # --- Description needed, proceed with LLM call ---
+                     logger.info(f"Generating description for {package_name}...")
+
+                     # Assemble context for this package
+                     context_str, content_type = self._assemble_description_context(files, desc_token_limit)
+                     logger.debug(f"Using context type '{content_type}' for {package_name} description.")
+
+                     # Create the task
+                     describe_task = task_creator.create_task(describer_agent, files, context_str)
+
+                     # Create and run the Crew, passing the specific LLM instance
+                     logger.debug(f"DEBUG: Analyzer LLM Config used: {analyzer_llm_config}")
+                     logger.debug(f"DEBUG: Analyzer LLM Instance Type: {type(analyzer_llm_instance)}")
+                     logger.debug(f"DEBUG: Analyzer LLM Instance Model: {getattr(analyzer_llm_instance, 'model', 'N/A')}")
+
+                     crew = Crew(
+                         agents=[describer_agent],
+                         tasks=[describe_task],
+                         process=Process.sequential,
+                         llm=analyzer_llm_instance,
+                         verbose=1 # Or configure via self.config
+                     )
+
+                     details_json = None
+                     raw_output_string = None
+                     for attempt in range(max_retries + 1):
+                         try:
+                             logger.debug(f"Attempt {attempt + 1}/{max_retries + 1} to kickoff description crew for {package_name}")
+                             result = crew.kickoff()
+
+                             # --- START: Modified Result Handling ---
+                             if hasattr(result, 'raw') and isinstance(result.raw, str):
+                                 raw_output_string = result.raw
+                                 logger.debug(f"Extracted raw string from CrewOutput.raw for {package_name}")
+                             elif isinstance(result, str):
+                                 raw_output_string = result
+                                 logger.debug(f"Crew kickoff returned a string directly for {package_name}")
+                             else:
+                                 logger.warning(f"Crew kickoff for {package_name} returned unexpected result type on attempt {attempt + 1}. Type: {type(result)}, Value: {result}")
+                                 raw_output_string = None
+                             # --- END: Modified Result Handling ---
+
+                             if raw_output_string:
+                                 # --- Use the utility function ---
+                                 details_json = parse_json_from_string(raw_output_string)
+                                 # --- End use the utility function ---
+
+                                 if details_json:
+                                     # Basic validation (can stay here or move to utility if needed)
+                                     if 'package_description' in details_json and 'file_roles' in details_json and isinstance(details_json.get('file_roles'), list):
+                                          logger.debug(f"Successfully parsed and validated LLM details for {package_name} on attempt {attempt + 1}")
+                                          break # Success
+                                     else:
+                                          logger.warning(f"Parsed JSON structure invalid for {package_name} on attempt {attempt + 1}. Parsed JSON: {details_json}")
+                                          details_json = None # Reset on invalid structure
+                             else:
+                                 details_json = None
+
+                         except Exception as e:
+                             logger.error(f"Crew kickoff failed for {package_name} on attempt {attempt + 1}: {e}", exc_info=True)
+                             details_json = None
+
+                         # If failed and retries remain, wait
+                         if details_json is None and attempt < max_retries:
+                             sleep_time = 1.5 ** attempt # Exponential backoff
+                             logger.info(f"Waiting {sleep_time:.2f}s before retry for {package_name} description...")
+                             time.sleep(sleep_time)
+                         elif details_json is not None:
+                              break # Success
+
+                     # Process results after retries and update the main dictionary
+                     if details_json:
+                         # Optional: Validate file list consistency
+                         llm_files = set(item.get('file_path') for item in details_json.get('file_roles', []) if isinstance(item, dict))
+                         input_files_set = set(files)
+                         if llm_files != input_files_set:
+                              logger.warning(f"File list mismatch between input ({len(input_files_set)}) and LLM file_roles ({len(llm_files)}) for {package_name}. Using input file list for 'files' key.")
+
+                         # Update the entry in current_packages_data
+                         current_packages_data[package_name] = {
+                             "description": details_json.get("package_description", "Error: Description missing"),
+                             "file_roles": details_json.get("file_roles", []), # Use LLM roles
+                             "files": files, # Use the balanced partition file list
+                             "total_tokens": sum(node_weights.get(f, 0) for f in files)
+                         }
+                     else:
+                         logger.error(f"Failed to get LLM description for {package_name} after {max_retries + 1} attempts. Marking as error.")
+                         # Update the entry in current_packages_data with error
+                         current_packages_data[package_name] = {
+                             "description": "Error: Failed to generate description",
+                             "file_roles": [{"file_path": f, "role": "Error"} for f in files],
+                             "files": files,
+                             "total_tokens": sum(node_weights.get(f, 0) for f in files)
+                         }
+                     # <<< End of if/else block for processing details_json
+
+                     # --- Save intermediate state via ContextManager AFTER processing each package ---
+                     logger.debug(f"Saving intermediate package state via ContextManager after processing {package_name}...")
+                     self.context_manager.save_packages_data(current_packages_data)
+
+                     # --- Accumulate the result for the final state manager update ---
+                     # This ensures final_packages_output reflects the latest saved state from the file
+                     final_packages_output[package_name] = current_packages_data[package_name]
+                 # <<< End of the 'for package_name, package_data in packages_to_process:' loop
+
+                 # --- START: Refinement Step ---
+                 # Only run refinement if the initial description LLM was available and we have packages
+                 if analyzer_llm_instance and final_packages_output:
+                     logger.info("--- Starting Package Description Refinement Step ---")
+                     try:
+                         # Use the same LLM instance for refinement for consistency, or configure separately if needed
+                         refiner_llm_instance = analyzer_llm_instance
+                         refiner_agent_creator = PackageRefinementAgent()
+                         refiner_agent = refiner_agent_creator.get_agent(llm_instance=refiner_llm_instance)
+                         refinement_task_creator = RefineDescriptionsTask()
+
+                         # Prepare context - use the state accumulated so far
+                         refinement_context = final_packages_output
+
+                         refine_task = refinement_task_creator.create_task(refiner_agent, refinement_context)
+
+                         refinement_crew = Crew(
+                             agents=[refiner_agent],
+                             tasks=[refine_task],
+                             process=Process.sequential,
+                             llm=refiner_llm_instance,
+                             verbose=1 # Or configure via self.config
+                         )
+
+                         logger.info("Kicking off refinement crew...")
+                         refinement_result = refinement_crew.kickoff()
+                         raw_refinement_output = None
+
+                         if hasattr(refinement_result, 'raw') and isinstance(refinement_result.raw, str):
+                             raw_refinement_output = refinement_result.raw
+                         elif isinstance(refinement_result, str):
+                             raw_refinement_output = refinement_result
+                         else:
+                             logger.warning(f"Refinement crew returned unexpected result type: {type(refinement_result)}")
+
+                         if raw_refinement_output:
+                             refined_descriptions_dict = parse_json_from_string(raw_refinement_output)
+
+                             if isinstance(refined_descriptions_dict, dict):
+                                 logger.info(f"Successfully parsed refinement results ({len(refined_descriptions_dict)} entries). Applying updates...")
+                                 update_count = 0
+                                 for pkg_name, refined_desc in refined_descriptions_dict.items():
+                                     if pkg_name in final_packages_output and isinstance(refined_desc, str):
+                                         if final_packages_output[pkg_name]['description'] != refined_desc:
+                                             logger.debug(f"Updating description for {pkg_name}")
+                                             final_packages_output[pkg_name]['description'] = refined_desc
+                                             update_count += 1
+                                         else:
+                                              logger.debug(f"Refined description for {pkg_name} is the same as initial. Skipping update.")
+                                     else:
+                                         logger.warning(f"Skipping refinement update for '{pkg_name}': Package not found in original data or refined description is not a string.")
+                                 logger.info(f"Applied {update_count} refined descriptions.")
+                                 # Save the refined data immediately
+                                 logger.info("Saving updated package data with refined descriptions via ContextManager...")
+                                 self.context_manager.save_packages_data(final_packages_output)
+                             else:
+                                 logger.error("Failed to parse refinement result dictionary from LLM output.")
+                         else:
+                             logger.error("Refinement crew did not return a usable string output.")
+
+                     except Exception as e:
+                         logger.error(f"An error occurred during the refinement step: {e}", exc_info=True)
+                         # Continue without refinement if it fails
+
+                     logger.info("--- Finished Package Description Refinement Step ---")
+                 elif not analyzer_llm_instance:
+                     logger.info("Skipping refinement step as initial description LLM ('analyzer') was not available.")
+                 elif not final_packages_output:
+                      logger.info("Skipping refinement step as there are no packages to refine.")
+                 # --- END: Refinement Step ---
+
+            # 6. Calculate Package Processing Order
+            processing_order = None
+            if final_packages_output and self.context_manager.include_graph:
+                 try:
+                      package_dep_graph = self._build_package_dependency_graph(
+                          final_packages_output,
+                          self.context_manager.include_graph
+                      )
+                      processing_order = self._calculate_package_order(package_dep_graph)
+                      if processing_order is None:
+                           logger.error("Failed to calculate package processing order due to detected cycle.")
+                           # Decide how to handle cycles - fail step? Continue without order?
+                           # For now, log error and continue without order.
+                 except Exception as order_err:
+                      logger.error(f"Error calculating package order: {order_err}", exc_info=True)
+                      processing_order = None # Ensure order is None on error
+            elif not self.context_manager.include_graph:
+                 logger.warning("Skipping package order calculation as include graph is not available.")
+            else: # No packages
+                 logger.info("Skipping package order calculation as no packages were identified/processed.")
+
+
+            # 7. Save Final State (Packages + Order) and Update State Manager
+            # Save the final package data (potentially refined) along with the calculated order
+            logger.info("Saving final package data and processing order via ContextManager...")
+            self.context_manager.save_packages_data(final_packages_output, processing_order)
+
+            # Update state manager with packages and order separately
+            logger.info("Updating State Manager with final package data...")
+            self.state_manager.set_packages(final_packages_output) # Use the method that handles structure
+            if processing_order is not None:
+                 logger.info("Updating State Manager with package processing order...")
+                 self.state_manager.set_package_processing_order(processing_order)
+            else:
+                 logger.warning("No processing order calculated or cycle detected. State Manager order not updated.")
+
+
+            package_count = len(final_packages_output)
+            order_status = f"with processing order ({len(processing_order)} steps)" if processing_order else "without a processing order (cycle detected or error)"
+            logger.info(f"Step 2 identified, described, and ordered {package_count} final work packages {order_status}.")
             self.state_manager.update_workflow_status('step2_complete')
             success = True
 
@@ -114,3 +554,103 @@ class Step2Executor(StepExecutor):
         finally:
             logger.info("--- Finished Step 2 Execution ---")
             return success
+
+    # --- Helper Functions for Package Ordering ---
+
+    def _build_package_dependency_graph(self,
+                                        packages_data: Dict[str, Dict[str, Any]],
+                                        file_include_graph: Dict[str, List[Dict[str, Any]]]) -> nx.DiGraph:
+        """
+        Builds a dependency graph between packages based on file includes.
+        An edge from P_A to P_B means P_A depends on P_B.
+        """
+        logger.info("Building package dependency graph...")
+        pkg_graph = nx.DiGraph()
+        file_to_package_map: Dict[str, str] = {}
+
+        # 1. Create file -> package mapping
+        for pkg_name, pkg_info in packages_data.items():
+            pkg_graph.add_node(pkg_name) # Add node for each package
+            files = pkg_info.get("files", [])
+            if isinstance(files, list):
+                for file_path in files:
+                    normalized_file = file_path.replace('\\', '/')
+                    if normalized_file in file_to_package_map:
+                        # This shouldn't happen with non-overlapping partitions, but log if it does
+                        logger.warning(f"File '{normalized_file}' found in multiple packages: '{file_to_package_map[normalized_file]}' and '{pkg_name}'. Using first encountered.")
+                    else:
+                        file_to_package_map[normalized_file] = pkg_name
+            else:
+                 logger.warning(f"Package '{pkg_name}' has invalid 'files' data: {files}")
+
+
+        # 2. Iterate through file dependencies to create package dependencies
+        edges_added = 0
+        if not file_include_graph:
+             logger.warning("File include graph is empty. Cannot build package dependency graph.")
+             return pkg_graph
+
+        for source_file, includes in file_include_graph.items():
+            normalized_source = source_file.replace('\\', '/')
+            source_pkg = file_to_package_map.get(normalized_source)
+            if not source_pkg:
+                # logger.debug(f"Source file '{normalized_source}' not found in any package. Skipping its dependencies.")
+                continue # Skip files not assigned to a package
+
+            if isinstance(includes, list):
+                for include_item in includes:
+                     if isinstance(include_item, dict) and 'path' in include_item:
+                          target_file = include_item['path'].replace('\\', '/')
+                          target_pkg = file_to_package_map.get(target_file)
+
+                          if target_pkg and source_pkg != target_pkg:
+                              # Add edge from source_pkg to target_pkg (source depends on target)
+                              if not pkg_graph.has_edge(source_pkg, target_pkg):
+                                   pkg_graph.add_edge(source_pkg, target_pkg)
+                                   edges_added += 1
+                                   # logger.debug(f"Added package dependency edge: {source_pkg} -> {target_pkg} (due to {normalized_source} -> {target_file})")
+                     # else: logger.warning(f"Invalid include item format for {source_file}: {include_item}") # Can be verbose
+            # else: logger.warning(f"Invalid includes format for {source_file}: {includes}") # Can be verbose
+
+
+        logger.info(f"Built package dependency graph with {pkg_graph.number_of_nodes()} nodes and {pkg_graph.number_of_edges()} edges.")
+        return pkg_graph
+
+    def _calculate_package_order(self, pkg_graph: nx.DiGraph) -> Optional[List[str]]:
+        """
+        Calculates a processing order for packages using topological sort (Kahn's algorithm),
+        prioritizing nodes with lower out-degree when multiple nodes have an in-degree of 0.
+
+        Args:
+            pkg_graph: The package dependency graph (DiGraph) where an edge P_A -> P_B
+                       means P_A depends on P_B.
+
+        Returns:
+            A list of package names in a valid processing order, or None if a cycle is detected.
+        """
+        logger.info("Calculating package processing order using PageRank...")
+        if not pkg_graph or not pkg_graph.nodes():
+            logger.warning("Package graph is empty or has no nodes. Cannot calculate order.")
+            return []
+
+        try:
+            # Calculate PageRank - higher score means more important (depended upon more)
+            # Note: pagerank handles cycles inherently.
+            # We might need to adjust alpha (damping factor) or other params if needed.
+            pagerank_scores = nx.pagerank(pkg_graph)
+
+            # Sort packages by PageRank score in descending order
+            # Packages with higher scores (more depended upon) come first.
+            ordered_packages = sorted(pagerank_scores, key=pagerank_scores.get, reverse=True)
+
+            logger.info(f"Successfully calculated package processing order using PageRank: {ordered_packages}")
+            # Log scores for debugging if needed
+            # for pkg in ordered_packages: logger.debug(f"  - {pkg}: {pagerank_scores[pkg]:.4f}")
+            return ordered_packages
+
+        except Exception as e:
+            logger.error(f"Error calculating PageRank for package order: {e}", exc_info=True)
+            # Fallback: return packages in an arbitrary order (e.g., sorted alphabetically)
+            # or None to indicate failure. Let's return sorted list as a fallback.
+            logger.warning("Falling back to alphabetical package order due to PageRank error.")
+            return sorted(list(pkg_graph.nodes()))

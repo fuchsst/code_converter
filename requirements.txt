@@ -22,3 +22,7 @@ fire
 # Optional: For CrewAI tools if used directly
 crewai-tools>=0.40.1
 crewai[tools]
+
+# Graph analysis dependencies
+networkx>=3.4.2
+python-louvain>=0.16

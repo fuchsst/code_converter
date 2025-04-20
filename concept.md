@@ -34,13 +34,48 @@ The 5-step workflow forms the core of the conversion process. Each step presents
 * **Output:** The `dependencies.json` output is currently a standard dictionary mapping file paths to lists of included files, ensuring structured output suitable for machine processing in subsequent steps.  
 * **Assessment:** This deterministic step is a strong foundation. Its accuracy is vital, as the dependency graph informs context selection and work package definition later. Tools like include-graph 140, cpp-dependency-analyzer 161, and commercial options like CppDepend 138 perform similar analyses.
 
-### **3.2. Step 2: Work Package Identification (LLM-Assisted, Iterative)**
+### **3.2. Step 2: Work Package Identification & Description (Deterministic Partitioning + LLM Description)**
 
-* **Objective & Approach:** Use a PackageIdentifierAgent (CrewAI Agent) and IdentifyWorkPackagesTask (CrewAI Task) 45 to propose logical work packages based on the dependency graph.  
-* **Context:** The dependency graph JSON is the primary input. For very large projects, the full graph might exceed feasible context limits or processing capabilities, potentially necessitating summarization or partitioning *before* the LLM call, which conflicts with the goal of avoiding LLM summarization stated in Section II(6) of the plan.  
-* **Prompting:** The goal of using a single, effective prompt for zero/few-shot identification is ambitious. Crafting a prompt that enables the LLM to reliably partition a complex C++ dependency graph into meaningful, balanced work packages requires significant engineering.50 The prompt must clearly define what constitutes a "logical work package" (e.g., based on feature, module boundaries suggested by directory structure, minimizing inter-package dependencies).  
-* **Iteration:** The main script-driven iteration loop (parse LLM output JSON, evaluate, formulate feedback, update context, re-run task) aligns with API minimization but places a heavy burden on the script's logic. This contrasts with agent self-refinement patterns 31 or multi-agent review loops 47 which might offer more sophisticated refinement but at higher API cost.  
-* **Assessment:** This step's success depends heavily on the LLM's ability to interpret graph structures and apply partitioning logic based solely on the prompt and JSON data. The quality of the generated work packages directly impacts the manageability of the subsequent conversion steps.
+*   **Objective & Approach:** Employ a two-phase approach.
+    1.  **Deterministic Partitioning:** Use a deterministic graph partitioning algorithm (as detailed below) to partition the weighted, directed dependency graph (`dependencies.json` from Step 1) into balanced, cohesive work packages based on file token counts (node weights) and dependency strengths (edge weights). This replaces the previous BFS/LLM identification method. Recommended algorithms include:
+        *   **Multilevel Graph/Hypergraph Partitioning (e.g., KaHyPar):** Directly optimizes for balanced partitions (token counts) while minimizing inter-package dependencies (cut size). Requires modeling directed dependencies, potentially using hypergraphs. \[Ref: step2\_research.md, Sec 3.5, 5.1]
+        *   **Spectral Clustering with p-Laplacian:** Integrates node weight balancing and edge-weighted cohesion. May require motif preprocessing and custom implementation. \[Ref: step2\_research.md, Sec 3.3, 5.1]
+        *   *(Alternative)* **Louvain Method with Post-Processing:** Maximizes cohesion first, then refines for balance. \[Ref: step2\_research.md, Sec 3.1, 5.1]
+        The `Step2Executor` implements the chosen algorithm.
+    2.  **LLM-based Description:** After partitioning, for each identified package, invoke a dedicated `PackageDescriberAgent` (using the `ANALYZER_MODEL`). This agent will analyze the source code content of the files within the package (context provided via `ContextManager`, likely focusing on interfaces/key functions) to generate:
+        *   A concise description of the package's overall purpose or theme.
+        *   Brief descriptions of the likely role of key files within the package.
+*   **Context:**
+    *   *Partitioning:* `dependencies.json` graph, file token counts (node weights), dependency weights (edge weights).
+    *   *Description:* For each package: the list of files, and relevant source code snippets/interfaces selected by the `ContextManager`.
+*   **Execution:**
+    1.  The `Step2Executor` runs the chosen partitioning algorithm (e.g., KaHyPar) with parameters (`k`, `ε`) to get the initial file-to-package mapping.
+    2.  The `Step2Executor` then iterates through each generated package. For each package, it assembles context (using `ContextManager`) and runs a `DescribePackageTask` via the `PackageDescriberAgent` (using a CrewAI `Crew`).
+*   **Output:** The final `packages.json` file will contain the structured package definitions, augmented with the LLM-generated descriptions. Example structure:
+    ```json
+    {
+      "package_1": {
+        "description": "Handles core player physics and input processing.",
+        "files": {
+          "player_controller.cpp": {
+            "role": "Main class for player movement and state management.",
+            "tokens": 1200
+          },
+          "input_handler.h": {
+            "role": "Interface for abstracting input devices.",
+            "tokens": 350
+          },
+          // ... other files ...
+        },
+        "total_tokens": 4500 // Example total
+      },
+      "package_2": {
+        // ... description, files, roles, tokens ...
+      }
+      // ... other packages ...
+    }
+    ```
+*   **Assessment:** This hybrid approach leverages deterministic algorithms for robust, balanced, and cohesive package *structure*. It then strategically uses an LLM for semantic *description*, adding valuable context for subsequent steps (Steps 3, 4) without compromising the partitioning's integrity or incurring excessive API calls (one call per package for description). The main challenges remain the implementation/configuration of the partitioning algorithm and ensuring the `PackageDescriberAgent` receives appropriate context to generate useful descriptions within token limits. The quality of the partitioning still directly impacts subsequent steps.
 
 ### **3.3. Step 3: Godot Structure Definition (LLM-Assisted, Iterative)**
 

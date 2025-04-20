@@ -4,7 +4,6 @@ from typing import Any, Dict, List, Optional, Type
 from .state_manager import StateManager
 from .context_manager import ContextManager
 from .tool_interfaces import IFileWriter, IFileReplacer, IFileReader, ISyntaxValidator
-from crewai.llm import LLM # Import CrewAI's LLM abstraction
 from src.logger_setup import get_logger
 
 logger = get_logger(__name__)
@@ -16,7 +15,7 @@ class StepExecutor(ABC):
                  state_manager: StateManager,
                  context_manager: ContextManager,
                  config: Dict[str, Any],
-                 llm_map: Dict[str, LLM], # Map role (e.g., 'analyzer') to LLM instance
+                 llm_configs: Dict[str, Dict[str, Any]], # Map role to LLM config dict
                  tools: Dict[Type, Any]): # Map interface type to tool instance
         """
         Initializes the StepExecutor.
@@ -25,17 +24,18 @@ class StepExecutor(ABC):
             state_manager (StateManager): Manages workflow state.
             context_manager (ContextManager): Manages context assembly.
             config (Dict[str, Any]): Application configuration dictionary.
-            llm_map (Dict[str, LLM]): Dictionary mapping role names (e.g., 'analyzer', 'mapper')
-                                       to pre-initialized crewai.llm.LLM instances.
+            llm_configs (Dict[str, Dict[str, Any]]): Dictionary mapping role names
+                                                     (e.g., 'analyzer', 'mapper')
+                                                     to their configuration dictionaries for LiteLLM.
             tools (Dict[Type, Any]): Dictionary mapping tool interface types (e.g., IFileWriter)
                                      to their concrete implementations.
         """
         self.state_manager = state_manager
         self.context_manager = context_manager
         self.config = config
-        self.llm_map = llm_map
+        self.llm_configs = llm_configs # Store the config map
         self.tools = tools
-        logger.debug(f"Initialized {self.__class__.__name__} with LLMs: {list(llm_map.keys())}, Tools: {[t.__name__ for t in tools.keys()]}")
+        logger.debug(f"Initialized {self.__class__.__name__} with LLM Configs: {list(llm_configs.keys())}, Tools: {[t.__name__ for t in tools.keys()]}")
 
     @abstractmethod
     def execute(self, package_ids: Optional[List[str]] = None, **kwargs) -> bool:
@@ -76,12 +76,12 @@ class StepExecutor(ABC):
         logger.debug(f"Found {len(eligible)} packages eligible for status '{target_status}' (Specific IDs requested: {specific_ids})")
         return eligible
 
-    def _get_llm(self, llm_role: str) -> Optional[LLM]:
-        """Helper to get a specific LLM instance from the injected map."""
-        llm_instance = self.llm_map.get(llm_role)
-        if not llm_instance:
-            logger.error(f"LLM instance for role '{llm_role}' not found in provided llm_map.")
-        return llm_instance
+    def _get_llm_config(self, llm_role: str) -> Optional[Dict[str, Any]]:
+        """Helper to get a specific LLM configuration dictionary from the injected map."""
+        llm_config = self.llm_configs.get(llm_role)
+        if not llm_config:
+            logger.error(f"LLM configuration for role '{llm_role}' not found in provided llm_configs map.")
+        return llm_config
 
     def _get_tool(self, tool_interface: Type) -> Optional[Any]:
         """Helper to get a tool instance based on its interface type."""

@@ -2,11 +2,15 @@
 import os
 import json
 import re
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 from src.logger_setup import get_logger
 import src.config as config
 import tiktoken # Added for token counting
 
 logger = get_logger(__name__)
+
+PACKAGES_JSON_FILENAME = "packages.json" # Define filename constant
 
 # --- Clang Imports ---
 try:
@@ -129,17 +133,22 @@ def check_token_limit(current_tokens: int, max_tokens: int) -> bool:
 # --- ContextManager Class ---
 
 class ContextManager:
-    def __init__(self, include_graph_path: str, cpp_source_dir: str):
+    def __init__(self, include_graph_path: str, cpp_source_dir: str, analysis_output_dir: str):
         """
         Initializes the ContextManager.
 
         Args:
             include_graph_path (str): Path to the JSON file containing the include graph.
             cpp_source_dir (str): Path to the root of the C++ source code.
+            analysis_output_dir (str): Path to the directory for analysis output files (like packages.json).
         """
         self.include_graph_path = include_graph_path
-        self.cpp_source_dir = os.path.abspath(cpp_source_dir)
+        self.cpp_source_dir = Path(cpp_source_dir).resolve() # Store as absolute Path
+        self.analysis_dir = Path(analysis_output_dir).resolve() # Store as absolute Path
+        self.packages_file_path = self.analysis_dir / PACKAGES_JSON_FILENAME
+
         self.include_graph = self._load_include_graph()
+        self.packages_data, self.package_processing_order = self._load_packages_data()
         self.clang_index = None
         self.compile_db = None
 
@@ -147,17 +156,17 @@ class ContextManager:
             try:
                 self.clang_index = clang.cindex.Index.create()
                 logger.info("Clang index created successfully.")
-                # Try to load compile_commands.json
-                compile_commands_dir = self.cpp_source_dir
-                cc_path = os.path.join(compile_commands_dir, 'compile_commands.json')
-                if os.path.exists(cc_path):
+                # Try to load compile_commands.json using Path
+                compile_commands_path = self.cpp_source_dir / 'compile_commands.json'
+                if compile_commands_path.exists():
                     try:
-                        self.compile_db = clang.cindex.CompilationDatabase.fromDirectory(compile_commands_dir)
-                        logger.info(f"Loaded compilation database from: {compile_commands_dir}")
+                        # Pass the directory path as a string
+                        self.compile_db = clang.cindex.CompilationDatabase.fromDirectory(str(self.cpp_source_dir))
+                        logger.info(f"Loaded compilation database from: {self.cpp_source_dir}")
                     except clang.cindex.LibclangError as db_err:
-                        logger.error(f"Failed to load compilation database from {compile_commands_dir}: {db_err}")
+                        logger.error(f"Failed to load compilation database from {self.cpp_source_dir}: {db_err}")
                 else:
-                    logger.warning(f"compile_commands.json not found in {compile_commands_dir}. Interface extraction may be inaccurate.")
+                    logger.warning(f"compile_commands.json not found in {self.cpp_source_dir}. Interface extraction may be inaccurate.")
             except Exception as clang_init_err:
                 logger.error(f"Failed to initialize Clang index or database: {clang_init_err}", exc_info=True)
                 self.clang_index = None # Ensure it's None on error
@@ -169,7 +178,8 @@ class ContextManager:
         if not self.include_graph:
              logger.warning(f"Include graph at '{include_graph_path}' failed to load or is empty.")
         else:
-             logger.info(f"Context Manager initialized. Loaded include graph with {len(self.include_graph)} entries.")
+             # Updated log message
+             logger.info(f"Context Manager initialized. Loaded include graph ({len(self.include_graph)} entries). Loaded packages data ({len(self.packages_data)} packages).")
 
     def _load_include_graph(self):
         """Loads the include graph JSON file."""
@@ -192,6 +202,81 @@ class ContextManager:
             logger.error(f"Failed to load include graph: {e}", exc_info=True)
             return {}
 
+    def _load_packages_data(self) -> Tuple[Dict[str, Any], Optional[List[str]]]:
+        """
+        Loads the packages data and processing order from the JSON file.
+        Returns a tuple: (packages_dict, processing_order_list | None).
+        """
+        packages_dict = {}
+        processing_order = None
+        if not self.packages_file_path.exists():
+            logger.info(f"{self.packages_file_path} not found. Initializing empty package data and order.")
+            return packages_dict, processing_order # Return empty dict and None if file doesn't exist
+
+        try:
+            with open(self.packages_file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            logger.info(f"Successfully loaded existing package data from {self.packages_file_path}")
+
+            # Validate overall structure
+            if not isinstance(data, dict):
+                logger.warning(f"Invalid structure in {self.packages_file_path}. Expected top-level dictionary. Initializing empty.")
+                return {}, None
+
+            # Load packages dictionary
+            if 'packages' in data and isinstance(data['packages'], dict):
+                 packages_dict = data['packages']
+                 logger.debug(f"Loaded {len(packages_dict)} packages.")
+            else:
+                 logger.warning(f"Missing or invalid 'packages' key in {self.packages_file_path}. Initializing empty packages.")
+                 packages_dict = {}
+
+            # Load processing order list (optional)
+            if 'processing_order' in data and isinstance(data['processing_order'], list):
+                 # Further validation: check if all items are strings
+                 if all(isinstance(item, str) for item in data['processing_order']):
+                      processing_order = data['processing_order']
+                      logger.debug(f"Loaded processing order with {len(processing_order)} packages.")
+                 else:
+                      logger.warning(f"Invalid items in 'processing_order' list in {self.packages_file_path}. Expected list of strings. Ignoring order.")
+                      processing_order = None # Reset if invalid items found
+            else:
+                 logger.debug(f"'processing_order' key not found or invalid in {self.packages_file_path}. No processing order loaded.")
+                 processing_order = None
+
+            return packages_dict, processing_order
+
+        except json.JSONDecodeError as e:
+            logger.error(f"Error decoding JSON from {self.packages_file_path}: {e}. Initializing empty.")
+            return {}, None
+        except Exception as e:
+            logger.error(f"Error loading {self.packages_file_path}: {e}. Initializing empty.", exc_info=True)
+            return {}, None
+
+    def save_packages_data(self, packages_data_to_save: Dict[str, Any], package_order: Optional[List[str]] = None):
+        """
+        Saves the provided packages data and optional processing order to the JSON file.
+        """
+        try:
+            self.analysis_dir.mkdir(parents=True, exist_ok=True)
+            # Create the top-level structure
+            output_data = {
+                "packages": packages_data_to_save,
+                "processing_order": package_order # Will be null in JSON if None
+            }
+            with open(self.packages_file_path, 'w', encoding='utf-8') as f:
+                json.dump(output_data, f, indent=4)
+            logger.debug(f"Saved package data ({len(packages_data_to_save)} packages) and order ({len(package_order) if package_order else 'None'}) to {self.packages_file_path}")
+            # Update internal state after successful save
+            self.packages_data = packages_data_to_save
+            self.package_processing_order = package_order
+        except Exception as e:
+            logger.error(f"Failed to save package data to {self.packages_file_path}: {e}", exc_info=True)
+
+    def get_package_order(self) -> Optional[List[str]]:
+        """Returns the loaded package processing order, if available."""
+        return self.package_processing_order
+
     def _extract_cpp_interface(self, file_path_abs: str) -> str | None:
         """
         Parses a C++ file using libclang and extracts declarations/signatures.
@@ -206,9 +291,11 @@ class ContextManager:
         try:
             args = []
             if self.compile_db:
-                commands = self.compile_db.getCompileCommands(file_path_abs)
+                # Pass path as string to getCompileCommands
+                commands = self.compile_db.getCompileCommands(str(file_path_abs))
                 if commands:
                     # Use the first command's arguments, excluding compiler and output flags
+                    # Convert Path objects in arguments back to strings if necessary
                     cmd_args = list(commands[0].arguments)[1:]
                     try:
                         o_idx = cmd_args.index('-o')
@@ -225,10 +312,11 @@ class ContextManager:
 
 
             # Parse the file, skipping function bodies for efficiency
+            # Pass path as string to parse
             # Consider adding PARSE_DETAILED_PROCESSING_RECORD if macro handling is needed
             tu = self.clang_index.parse(
-                file_path_abs,
-                args=args,
+                str(file_path_abs),
+                args=[str(arg) for arg in args], # Ensure all args are strings
                 options=clang.cindex.TranslationUnit.PARSE_SKIP_FUNCTION_BODIES |
                         clang.cindex.TranslationUnit.PARSE_INCOMPLETE # Try to parse even with errors
             )
@@ -249,16 +337,18 @@ class ContextManager:
 
             # Read the source file content once for extent extraction
             try:
+                # Use Path object directly with open
                 with open(file_path_abs, 'rb') as f: # Read as bytes for extent offsets
                     source_bytes = f.read()
             except Exception as read_err:
-                 logger.error(f"Could not read source file {file_path_abs} for extent extraction: {read_err}")
+                 logger.error(f"Could not read source file {str(file_path_abs)} for extent extraction: {read_err}")
                  return None # Cannot extract without source
 
             # Traverse the AST
             for cursor in tu.cursor.walk_preorder():
                 # Only process cursors from the main file, not included headers
-                if cursor.location.file and cursor.location.file.name == file_path_abs:
+                # Compare file names as strings
+                if cursor.location.file and cursor.location.file.name == str(file_path_abs):
                     if cursor.kind in INTERFACE_CURSOR_KINDS:
                         # Get the source range (extent) of the cursor
                         extent = cursor.extent
@@ -282,24 +372,24 @@ class ContextManager:
                             # Add newline for separation, handle nested elements later if needed
                             interface_parts.append(snippet + "\n")
                         except UnicodeDecodeError:
-                             logger.warning(f"Could not decode snippet from {file_path_abs} at offset {start_offset}:{end_offset}")
+                             logger.warning(f"Could not decode snippet from {str(file_path_abs)} at offset {start_offset}:{end_offset}")
 
 
             if not interface_parts:
-                 logger.warning(f"No interface elements extracted from {file_path_abs}. File might be empty or only contain implementations.")
+                 logger.warning(f"No interface elements extracted from {str(file_path_abs)}. File might be empty or only contain implementations.")
                  # Return empty string instead of None if parsing succeeded but found nothing
                  return ""
 
             # Join parts and add a header comment
-            final_interface = f"// Extracted interface from: {os.path.basename(file_path_abs)}\n\n" + "".join(interface_parts)
-            logger.debug(f"Successfully extracted interface from {file_path_abs} ({len(final_interface)} chars)")
+            final_interface = f"// Extracted interface from: {file_path_abs.name}\n\n" + "".join(interface_parts)
+            logger.debug(f"Successfully extracted interface from {str(file_path_abs)} ({len(final_interface)} chars)")
             return final_interface
 
         except clang.cindex.LibclangError as e:
-            logger.error(f"Libclang error extracting interface from {file_path_abs}: {e}", exc_info=True)
+            logger.error(f"Libclang error extracting interface from {str(file_path_abs)}: {e}", exc_info=True)
             return None
         except Exception as e:
-            logger.error(f"Unexpected error extracting interface from {file_path_abs}: {e}", exc_info=True)
+            logger.error(f"Unexpected error extracting interface from {str(file_path_abs)}: {e}", exc_info=True)
             return None
 
 
@@ -327,73 +417,81 @@ class ContextManager:
 
         # 1. Process Primary Files (Full Content)
         for rel_path in primary_relative_paths:
-            normalized_rel_path = rel_path.replace('\\', '/')
-            if normalized_rel_path in processed_paths: continue
+            # Paths are assumed to be normalized with '/' already
+            if rel_path in processed_paths: continue
 
-            abs_path = os.path.join(self.cpp_source_dir, normalized_rel_path)
-            if not os.path.exists(abs_path):
-                logger.warning(f"[Primary] File not found: {abs_path}")
+            # Construct absolute path using pathlib
+            abs_path_obj = self.cpp_source_dir / rel_path
+            abs_path_str = str(abs_path_obj) # Convert to string for functions expecting strings
+
+            if not abs_path_obj.exists():
+                logger.warning(f"[Primary] File not found: {abs_path_str}")
                 continue
 
             try:
-                file_content = read_file_content(abs_path)
+                file_content = read_file_content(abs_path_str)
                 if file_content is None: continue
 
                 content_tokens = count_tokens(file_content)
                 buffer = 50 # Small buffer per item
 
                 if check_token_limit(current_tokens + content_tokens + buffer, max_tokens):
-                    content_map[normalized_rel_path] = file_content
+                    # Use rel_path as the key consistently
+                    content_map[rel_path] = file_content
                     current_tokens += content_tokens
-                    processed_paths.add(normalized_rel_path)
-                    logger.debug(f"Added FULL content from {normalized_rel_path} ({content_tokens} tokens). Total: {current_tokens}")
+                    processed_paths.add(rel_path)
+                    logger.debug(f"Added FULL content from {rel_path} ({content_tokens} tokens). Total: {current_tokens}")
                 else:
-                    logger.warning(f"Skipping FULL content from {normalized_rel_path} due to token limit ({current_tokens}+{content_tokens}+{buffer} > {max_tokens}).")
+                    logger.warning(f"Skipping FULL content from {rel_path} due to token limit ({current_tokens}+{content_tokens}+{buffer} > {max_tokens}).")
                     break # Stop adding primary files
 
             except Exception as e:
-                logger.error(f"Error processing primary file {abs_path}: {e}", exc_info=True)
+                logger.error(f"Error processing primary file {abs_path_str}: {e}", exc_info=True)
 
         # 2. Process Dependency Files (Interface Extraction)
         # Only proceed if token limit wasn't hit by primary files
         if current_tokens < max_tokens:
             for rel_path in dependency_relative_paths:
-                normalized_rel_path = rel_path.replace('\\', '/')
-                if normalized_rel_path in processed_paths: continue # Skip if already added as primary
+                # Paths are assumed to be normalized with '/' already
+                if rel_path in processed_paths: continue # Skip if already added as primary
 
-                abs_path = os.path.join(self.cpp_source_dir, normalized_rel_path)
-                if not os.path.exists(abs_path):
-                    logger.warning(f"[Dependency] File not found: {abs_path}")
+                # Construct absolute path using pathlib
+                abs_path_obj = self.cpp_source_dir / rel_path
+                abs_path_str = str(abs_path_obj) # Convert to string for functions expecting strings
+
+                if not abs_path_obj.exists():
+                    logger.warning(f"[Dependency] File not found: {abs_path_str}")
                     continue
 
                 try:
                     # Extract interface (returns None on clang error, "" if parse ok but no elements)
-                    interface_content = self._extract_cpp_interface(abs_path)
+                    # Pass the Path object to _extract_cpp_interface
+                    interface_content = self._extract_cpp_interface(abs_path_obj)
 
                     if interface_content is not None: # Check for None (parse error)
                         if not interface_content: # Handle empty interface string
-                             logger.debug(f"Extracted empty interface for {normalized_rel_path}. Skipping addition.")
-                             processed_paths.add(normalized_rel_path) # Mark as processed
+                             logger.debug(f"Extracted empty interface for {rel_path}. Skipping addition.")
+                             processed_paths.add(rel_path) # Mark as processed
                              continue
 
                         content_tokens = count_tokens(interface_content)
                         buffer = 50 # Small buffer per item
 
                         if check_token_limit(current_tokens + content_tokens + buffer, max_tokens):
-                            content_map[normalized_rel_path] = interface_content # Add the extracted interface
+                            content_map[rel_path] = interface_content # Add the extracted interface
                             current_tokens += content_tokens
-                            processed_paths.add(normalized_rel_path)
-                            logger.debug(f"Added INTERFACE content from {normalized_rel_path} ({content_tokens} tokens). Total: {current_tokens}")
+                            processed_paths.add(rel_path)
+                            logger.debug(f"Added INTERFACE content from {rel_path} ({content_tokens} tokens). Total: {current_tokens}")
                         else:
-                            logger.warning(f"Skipping INTERFACE content from {normalized_rel_path} due to token limit ({current_tokens}+{content_tokens}+{buffer} > {max_tokens}).")
+                            logger.warning(f"Skipping INTERFACE content from {rel_path} due to token limit ({current_tokens}+{content_tokens}+{buffer} > {max_tokens}).")
                             break # Stop adding dependency files
                     else:
                          # Extraction failed (logged in _extract_cpp_interface)
-                         logger.warning(f"Failed to extract interface for dependency {normalized_rel_path}. Skipping.")
-                         processed_paths.add(normalized_rel_path) # Mark as processed even on failure
+                         logger.warning(f"Failed to extract interface for dependency {rel_path}. Skipping.")
+                         processed_paths.add(rel_path) # Mark as processed even on failure
 
                 except Exception as e:
-                    logger.error(f"Error processing dependency file {abs_path}: {e}", exc_info=True)
+                    logger.error(f"Error processing dependency file {abs_path_str}: {e}", exc_info=True)
 
         logger.info(f"Finished retrieving contextual content. {len(content_map)} files added. Total tokens: {current_tokens}")
         return content_map

@@ -9,7 +9,7 @@ from ..remapping_logic import RemappingLogic
 from ..tool_interfaces import IFileWriter, IFileReplacer, IFileReader, ISyntaxValidator
 from src.agents.code_processor import CodeProcessorAgent
 from src.tasks.process_code import ProcessCodeTask
-from crewai import Crew, Process
+from crewai import Crew, Process, LLM
 from src.logger_setup import get_logger
 
 logger = get_logger(__name__)
@@ -64,11 +64,21 @@ class Step5Executor(StepExecutor):
             self.state_manager.update_workflow_status('failed_step5', "Required tools missing.")
             return False
 
-        # Get the LLM instance for the generator/editor role
-        generator_llm = self._get_llm('generator') # Assuming 'generator' is the key
-        if not generator_llm:
-             logger.error("Generator LLM instance not found. Cannot execute Step 5.")
-             self.state_manager.update_workflow_status('failed_step5', "Generator LLM not configured.")
+        # Get the LLM config and instantiate the LLM object
+        generator_llm_config = self._get_llm_config('generator')
+        generator_llm_instance = None
+        if generator_llm_config:
+            try:
+                generator_llm_instance = LLM(**generator_llm_config)
+                logger.info(f"Instantiated crewai.LLM for role 'generator': {generator_llm_config.get('model')}")
+            except Exception as e:
+                logger.error(f"Failed to instantiate crewai.LLM for role 'generator': {e}", exc_info=True)
+        else:
+            logger.error("Generator LLM configuration ('generator') not found.")
+
+        if not generator_llm_instance:
+             logger.error("Generator LLM instance could not be created. Cannot execute Step 5.")
+             self.state_manager.update_workflow_status('failed_step5', "Generator LLM not configured or failed to instantiate.")
              return False
 
         for pkg_id in eligible_packages:
@@ -141,14 +151,15 @@ class Step5Executor(StepExecutor):
                             raise ValueError("Failed to assemble context for task.")
 
                         # --- Agent Invocation ---
-                        agent = CodeProcessorAgent().get_agent()
+                        agent = CodeProcessorAgent().get_agent(llm_instance=generator_llm_instance)
                         task_item_json_str = json.dumps(task_item)
                         process_task = ProcessCodeTask().create_task(agent, task_context, task_item_json_str)
 
+                        # Create and run Crew
                         crew = Crew(
                             agents=[agent],
                             tasks=[process_task],
-                            llm=generator_llm, # Use the generator LLM
+                            llm=generator_llm_instance,
                             process=Process.sequential,
                             verbose=False
                         )

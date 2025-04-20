@@ -8,7 +8,7 @@ LOG_FILE = os.path.join(LOG_DIR, "conversion.log")
 MAX_LOG_SIZE = 10 * 1024 * 1024  # 10 MB
 BACKUP_COUNT = 5
 
-def setup_logging(log_level=logging.INFO):
+def setup_logging(log_level=logging.INFO): # Reverted default back to INFO
     """Configures logging for the application."""
     if not os.path.exists(LOG_DIR):
         os.makedirs(LOG_DIR)

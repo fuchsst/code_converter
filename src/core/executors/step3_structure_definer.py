@@ -7,7 +7,7 @@ from ..state_manager import StateManager
 from ..context_manager import ContextManager
 from src.agents.structure_definer import StructureDefinerAgent
 from src.tasks.define_structure import DefineStructureTask
-from crewai import Crew, Process
+from crewai import Crew, Process, LLM
 from src.logger_setup import get_logger
 
 logger = get_logger(__name__)
@@ -40,11 +40,21 @@ class Step3Executor(StepExecutor):
         overall_success = True
         analysis_dir = self.config.get("ANALYSIS_OUTPUT_DIR", "analysis_output")
 
-        # Get the LLM instance for the mapper role
-        mapper_llm = self._get_llm('mapper') # Assuming 'mapper' is the key in llm_map
-        if not mapper_llm:
-             logger.error("Mapper LLM instance not found. Cannot execute Step 3.")
-             self.state_manager.update_workflow_status('failed_step3', "Mapper LLM not configured.")
+        # Get the LLM config and instantiate the LLM object
+        mapper_llm_config = self._get_llm_config('mapper')
+        mapper_llm_instance = None
+        if mapper_llm_config:
+            try:
+                mapper_llm_instance = LLM(**mapper_llm_config)
+                logger.info(f"Instantiated crewai.LLM for role 'mapper': {mapper_llm_config.get('model')}")
+            except Exception as e:
+                logger.error(f"Failed to instantiate crewai.LLM for role 'mapper': {e}", exc_info=True)
+        else:
+            logger.error("Mapper LLM configuration ('mapper') not found.")
+
+        if not mapper_llm_instance:
+             logger.error("Mapper LLM instance could not be created. Cannot execute Step 3.")
+             self.state_manager.update_workflow_status('failed_step3', "Mapper LLM not configured or failed to instantiate.")
              return False
 
         for pkg_id in eligible_packages:
@@ -80,14 +90,14 @@ class Step3Executor(StepExecutor):
                      raise ValueError("Failed to assemble context for Step 3.")
 
                 # Instantiate Agent and Task
-                agent = StructureDefinerAgent().get_agent()
+                agent = StructureDefinerAgent().get_agent(llm_instance=mapper_llm_instance)
                 task = DefineStructureTask().create_task(agent, context)
 
                 # Create and run Crew
                 crew = Crew(
                     agents=[agent],
                     tasks=[task],
-                    llm=mapper_llm, # Use the mapper LLM
+                    llm=mapper_llm_instance,
                     process=Process.sequential,
                     verbose=True
                 )

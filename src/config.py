@@ -17,7 +17,7 @@ if not GEMINI_API_KEY:
 # --- Model Configuration ---
 # Allows specifying different models for different agents
 # Format: "provider/model_name" (e.g., "gemini/gemini-1.5-pro-latest")
-DEFAULT_AGENT_MODEL = "gemini/gemini-2.0-flash-001" # Cost-effective default
+DEFAULT_AGENT_MODEL = "gemini-2.5-flash-preview-04-17" # Cost-effective default
 # Environment variables (if set) should also follow the "provider/model_name" format.
 ORCHESTRATOR_MODEL = os.getenv("ORCHESTRATOR_MODEL", "gemini/gemini-2.5-pro-preview-03-25")
 ANALYZER_MODEL = os.getenv("ANALYZER_MODEL", DEFAULT_AGENT_MODEL) # Defaults to the already formatted DEFAULT_AGENT_MODEL
@@ -50,14 +50,36 @@ TARGET_LANGUAGE = os.getenv("TARGET_LANGUAGE", "GDScript") # Default, override v
 # --- Orchestrator Settings ---
 TASK_ITEM_MAX_RETRIES = int(os.getenv("TASK_ITEM_MAX_RETRIES", 2)) # Max retries for a single task item in Step 5
 MAX_REMAPPING_ATTEMPTS = int(os.getenv("MAX_REMAPPING_ATTEMPTS", 1)) # Max times Step 4 can be re-run for a package
+LLM_CALL_RETRIES = int(os.getenv("LLM_CALL_RETRIES", 2)) # General retries for LLM calls within steps (e.g., Step 2 details)
+
+# --- Dependency Analysis Settings (Step 1) ---
+# Comma-separated list of folder paths relative to CPP_PROJECT_DIR to exclude
+# Example: EXCLUDE_FOLDERS="build,tests,external/lib"
+exclude_folders_str = os.getenv("EXCLUDE_FOLDERS", "")
+EXCLUDE_FOLDERS = [folder.strip() for folder in exclude_folders_str.split(',') if folder.strip()] if exclude_folders_str else []
+if EXCLUDE_FOLDERS:
+    logger.info(f"Dependency analysis will exclude folders: {EXCLUDE_FOLDERS}")
+
 
 # --- Context & Token Management ---
 # Max tokens allowed for the context assembled *before* adding the main prompt
-MAX_CONTEXT_TOKENS = int(os.getenv("MAX_CONTEXT_TOKENS", 800000)) # Gemini 2.5 Pro has 1M, leave buffer
+MAX_CONTEXT_TOKENS = int(os.getenv("MAX_CONTEXT_TOKENS", 1_000_000)) # Gemini 2.5 Pro has 1M, leave buffer
 # Buffer subtracted from MAX_CONTEXT_TOKENS to leave room for prompt/response overhead
 PROMPT_TOKEN_BUFFER = int(os.getenv("PROMPT_TOKEN_BUFFER", 5000))
 # Ratio of MAX_CONTEXT_TOKENS allocated to file content vs other context items
 CONTEXT_FILE_BUDGET_RATIO = float(os.getenv("CONTEXT_FILE_BUDGET_RATIO", 0.9)) # 90% for files
+
+# --- Package Identification Settings (Step 2) ---
+# Max estimated tokens for a single package's content/interface (used for splitting large clusters)
+MAX_PACKAGE_SIZE_TOKENS = int(os.getenv("MAX_PACKAGE_SIZE_TOKENS", 120_000))
+# Minimum number of files for a cluster to be considered a valid final package
+MIN_PACKAGE_SIZE_FILES = int(os.getenv("MIN_PACKAGE_SIZE_FILES", 10))
+# Ratio of LLM's context window to use for description/evaluation calls
+LLM_DESC_MAX_TOKENS_RATIO = float(os.getenv("LLM_DESC_MAX_TOKENS_RATIO", 0.5))
+# Maximum number of iterations for the package merging loop
+MAX_MERGE_ITERATIONS = int(os.getenv("MAX_MERGE_ITERATIONS", 5))
+# Minimum score (based on graph connectivity) for a merge candidate pair to be considered
+MERGE_SCORE_THRESHOLD = float(os.getenv("MERGE_SCORE_THRESHOLD", 0.5))
 
 # --- Generation Settings ---
 DEFAULT_TEMPERATURE = float(os.getenv("DEFAULT_TEMPERATURE", 0.7))

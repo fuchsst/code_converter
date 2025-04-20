@@ -16,10 +16,12 @@ class Step1Executor(StepExecutor):
 
     def __init__(self,
                  state_manager: StateManager,
-                 context_manager: ContextManager, # ContextManager might not be strictly needed here, but keep for consistency?
-                 config: Dict[str, Any]):
-        # Step 1 doesn't need LLMs or specific tools beyond the dependency analyzer util
-        super().__init__(state_manager, context_manager, config, llm_map={}, tools={})
+                 context_manager: ContextManager,
+                 config: Dict[str, Any],
+                 llm_configs: Dict[str, Dict[str, Any]], # Accept args from Orchestrator
+                 tools: Dict[type, Any]):                # Accept args from Orchestrator
+        # Pass the received (empty) llm_configs and tools to the base class constructor
+        super().__init__(state_manager, context_manager, config, llm_configs, tools)
         self.cpp_project_dir = os.path.abspath(config.get("CPP_PROJECT_DIR", "data/cpp_project"))
         self.analysis_dir = os.path.abspath(config.get("ANALYSIS_OUTPUT_DIR", "analysis_output"))
         self.include_graph_path = os.path.join(self.analysis_dir, "dependencies.json")
@@ -39,10 +41,18 @@ class Step1Executor(StepExecutor):
         self.state_manager.update_workflow_status('running_step1')
         success = False
         try:
-            analysis_success = generate_include_graph_regex(self.cpp_project_dir, self.include_graph_path)
+            # Retrieve exclude folders list from config, default to empty list
+            exclude_folders = self.config.get("EXCLUDE_FOLDERS", [])
+            logger.info(f"Exclude folders configuration: {exclude_folders}")
+
+            analysis_success = generate_include_graph_regex(
+                self.cpp_project_dir,
+                self.include_graph_path,
+                exclude_folders=exclude_folders
+            )
 
             if analysis_success:
-                logger.info("Step 1 dependency analysis (regex) completed successfully.")
+                logger.info("Step 1 dependency analysis (regex with weights and exclusion) completed successfully.")
                 # Reload graph data in ContextManager? Orchestrator should handle this after step execution.
                 self.state_manager.update_workflow_status('step1_complete')
                 success = True

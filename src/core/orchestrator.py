@@ -19,8 +19,7 @@ from .executors.step5_process_code import Step5Executor
 from src.tools.framework_tools_wrapper import (
     CrewAIFileWriter, CrewAIFileReader, CustomFileReplacer, GodotSyntaxValidator
 )
-# Import CrewAI LLM
-from crewai import LLM
+import litellm # Import litellm
 
 logger = get_logger(__name__)
 
@@ -57,16 +56,17 @@ class Orchestrator:
         # State Manager
         self.state_manager = StateManager(analysis_dir=self.analysis_dir)
 
-        # Context Manager (needs graph path and source dir)
+        # Context Manager (needs graph path, source dir, and analysis dir)
         self.context_manager = ContextManager(
             include_graph_path=self.include_graph_path,
-            cpp_source_dir=self.cpp_project_dir
+            cpp_source_dir=self.cpp_project_dir,
+            analysis_output_dir=self.analysis_dir
         )
         # Ensure ContextManager loads the graph if Step 1 might have just run
         self.context_manager.include_graph = self.state_manager.get_state().get("include_graph_data", {}) # Or reload from file?
 
-        # LLM Instances (using crewai.llm.LLM)
-        self.llm_map = self._initialize_llms()
+        # LLM Configurations (for direct litellm use)
+        self.llm_configs = self._initialize_llm_configs()
 
         # Tool Wrappers
         self.tools = self._initialize_tools()
@@ -80,7 +80,7 @@ class Orchestrator:
         logger.info("Orchestrator and components initialized.")
         logger.info(f"  Analysis Dir: {self.analysis_dir}")
         logger.info(f"  State File: {self.state_manager.state_file_path}")
-        logger.info(f"  LLMs Initialized: {list(self.llm_map.keys())}")
+        logger.info(f"  LLM Configs Initialized: {list(self.llm_configs.keys())}")
         logger.info(f"  Tools Initialized: {[t.__name__ for t in self.tools.keys()]}")
 
 
@@ -104,80 +104,52 @@ class Orchestrator:
         logger.debug("Configuration loaded and resolved.")
         return cfg
 
-    def _initialize_llms(self) -> Dict[str, LLM]:
-        """Initializes CrewAI LLM instances based on config."""
-        llms = {}
-        llm_configs = {
+    def _initialize_llm_configs(self) -> Dict[str, Dict[str, Any]]:
+        """Initializes LLM configuration dictionaries for LiteLLM based on config."""
+        llm_configs_map = {}
+        role_to_model_map = {
             'analyzer': self.config_dict.get("ANALYZER_MODEL"),
             'mapper': self.config_dict.get("MAPPER_MODEL"),
             'generator': self.config_dict.get("GENERATOR_EDITOR_MODEL"),
             # Add 'reviewer' if needed
         }
-        # Common LLM settings from config (can be overridden per LLM if needed)
-        common_llm_params = {
+        # Common LLM settings from config
+        common_params = {
             "temperature": self.config_dict.get("DEFAULT_TEMPERATURE", 0.7),
             "top_p": self.config_dict.get("DEFAULT_TOP_P", 0.95),
             "top_k": self.config_dict.get("DEFAULT_TOP_K", 40),
-            # Add other common params like api_key if needed and not handled by env vars
+            # Add other common params if needed by litellm.completion
         }
-        # Specific provider setup (e.g., API keys) is expected to be handled
-        # by environment variables as per CrewAI documentation.
 
-        for role, model_name in llm_configs.items():
+        for role, model_name in role_to_model_map.items():
             if model_name:
-                try:
-                    # Ensure API key is set (CrewAI checks env vars by default)
-                    if "gemini" in model_name and not config.GEMINI_API_KEY:
-                         logger.warning(f"GEMINI_API_KEY not set, LLM for role '{role}' ({model_name}) might fail.")
-                     # Add checks for other providers if used
+                # Prepare the config dictionary for this role
+                config_for_role = {
+                    "model": model_name,
+                    **common_params # Add common params
+                }
 
-                    # Explicitly pass API key based on provider because auto-detection seems unreliable here
-                    llm_params = common_llm_params.copy()
-                    api_key = None
-                    # Check config_dict first (which should have loaded from env/.env via src/config.py)
-                    if model_name.startswith(("gemini/", "google/")): # Keep google/ just in case
-                        api_key = self.config_dict.get("GEMINI_API_KEY")
-                        if not api_key:
-                             logger.warning(f"GEMINI_API_KEY not found in config for model {model_name}. Relying on env var fallback.")
-                             # As a fallback, check env var directly in case config loading missed it
-                             api_key = os.getenv("GEMINI_API_KEY")
-                     # Add elif blocks for other providers (Anthropic, Azure, etc.) if needed
-
-                    # Prepare parameters to pass directly to LiteLLM via litellm_params
-                    direct_litellm_params = {}
+                # Add API key if needed and available (LiteLLM primarily uses env vars)
+                # Example for Gemini:
+                if model_name.startswith(("gemini/", "google/")):
+                    api_key = self.config_dict.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
                     if api_key:
-                         direct_litellm_params["api_key"] = api_key
-                         logger.debug(f"Explicitly providing api_key for {model_name} via litellm_params")
+                        config_for_role["api_key"] = api_key
+                        logger.debug(f"Adding GEMINI_API_KEY to config for role '{role}'")
                     else:
-                         logger.warning(f"Could not find explicit API key for {model_name} in config or environment. LiteLLM might fail.")
+                        logger.warning(f"GEMINI_API_KEY not found in config or env for role '{role}' ({model_name}). LiteLLM might fail.")
+                # Add elif blocks for other providers if explicit key passing is desired
 
-                    # Determine base_url based on model
-                    base_url = None
-                    if model_name.startswith(("gemini/", "google/")):
-                        base_url = "https://generativelanguage.googleapis.com" # Add Gemini base URL
-                        logger.debug(f"Setting base_url for Gemini: {base_url}")
-                    # Add elif for other providers if needed
-
-                    # Pass common params and the specific litellm_params to crewai.LLM
-                    llms[role] = LLM(
-                        model=model_name,
-                        base_url=base_url,
-                        temperature=common_llm_params.get("temperature"),
-                        top_p=common_llm_params.get("top_p"),
-                        top_k=common_llm_params.get("top_k"),
-                        litellm_params=direct_litellm_params # Pass API key here
-                    )
-                    logger.info(f"Initialized LLM for role '{role}': {model_name}")
-                except Exception as e:
-                    logger.error(f"Failed to initialize LLM for role '{role}' ({model_name}): {e}", exc_info=True)
+                llm_configs_map[role] = config_for_role
+                logger.info(f"Prepared LLM config for role '{role}': model={model_name}")
             else:
                 logger.warning(f"No model configured for LLM role '{role}'.")
 
-        if not llms:
-             logger.error("No LLM instances were successfully initialized!")
-             # raise RuntimeError("Failed to initialize any LLM instances.") # Optional: Make this fatal
+        if not llm_configs_map:
+             logger.error("No LLM configurations were successfully prepared!")
+             # Consider raising an error if LLMs are essential
 
-        return llms
+        return llm_configs_map
 
     def _initialize_tools(self) -> Dict[Type, Any]:
         """Initializes concrete tool wrapper instances."""
@@ -192,12 +164,13 @@ class Orchestrator:
 
     def _initialize_executors(self) -> Dict[str, StepExecutor]:
         """Initializes all step executors, injecting dependencies."""
+        # Step 1 doesn't use LLMs or Tools, but the base class expects the args. Pass empty dicts.
         executors = {
-            "step1": Step1Executor(self.state_manager, self.context_manager, self.config_dict),
-            "step2": Step2Executor(self.state_manager, self.context_manager, self.config_dict, self.llm_map, self.tools),
-            "step3": Step3Executor(self.state_manager, self.context_manager, self.config_dict, self.llm_map, self.tools),
-            "step4": Step4Executor(self.state_manager, self.context_manager, self.config_dict, self.llm_map, self.tools),
-            "step5": Step5Executor(self.state_manager, self.context_manager, self.config_dict, self.llm_map, self.tools, self.remapping_logic)
+            "step1": Step1Executor(self.state_manager, self.context_manager, self.config_dict, llm_configs={}, tools={}),
+            "step2": Step2Executor(self.state_manager, self.context_manager, self.config_dict, self.llm_configs, self.tools),
+            "step3": Step3Executor(self.state_manager, self.context_manager, self.config_dict, self.llm_configs, self.tools),
+            "step4": Step4Executor(self.state_manager, self.context_manager, self.config_dict, self.llm_configs, self.tools),
+            "step5": Step5Executor(self.state_manager, self.context_manager, self.config_dict, self.llm_configs, self.tools, self.remapping_logic)
         }
         logger.debug("Step executors initialized.")
         return executors

@@ -2,7 +2,7 @@
 import os
 import json
 from src.logger_setup import get_logger
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional
 
 logger = get_logger(__name__)
 
@@ -47,6 +47,7 @@ class StateManager:
         return {
             "workflow_status": "pending", # e.g., pending, running, completed, failed
             "work_packages": {}, # Stores package_id -> {description, files, status, artifacts: {}, remapping_attempts: 0, last_error: None}
+            "package_processing_order": None, # Stores the calculated order list
             "last_error": None,
             # Add other global state info if needed
         }
@@ -148,4 +149,21 @@ class StateManager:
 
         self.state['work_packages'] = validated_packages
         logger.info(f"Set {len(validated_packages)} work packages in state.")
+        # Reset order when packages are set, it needs recalculation
+        if 'package_processing_order' in self.state:
+             self.state['package_processing_order'] = None
+             logger.info("Reset package processing order as work packages were updated.")
         self.save_state()
+
+    def set_package_processing_order(self, order: Optional[List[str]]):
+        """Sets the calculated package processing order in the state."""
+        if order is None or isinstance(order, list):
+            self.state['package_processing_order'] = order
+            logger.info(f"Set package processing order in state ({len(order) if order else 'None'} packages).")
+            self.save_state()
+        else:
+            logger.error(f"Attempted to set invalid package processing order (type: {type(order)}). State not updated.")
+
+    def get_package_processing_order(self) -> Optional[List[str]]:
+        """Retrieves the calculated package processing order from the state."""
+        return self.state.get('package_processing_order')

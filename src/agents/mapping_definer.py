@@ -1,5 +1,5 @@
 # src/agents/mapping_definer.py
-from crewai import Agent
+from crewai import Agent, BaseLLM
 from src.logger_setup import get_logger
 import src.config as config
 # Assuming api_utils handles LLM configuration and calls via CrewAI's mechanism
@@ -14,11 +14,16 @@ class MappingDefinerAgent:
     the proposed Godot structure.
     """
     def __init__(self):
-        # LLM configuration managed by CrewAI/global setup
-        logger.info(f"Initializing MappingDefinerAgent (LLM configuration managed by CrewAI/global setup using model like: {config.MAPPER_MODEL})")
+        # LLM configuration will now be passed explicitly to get_agent
+        logger.info(f"Initializing MappingDefinerAgent (LLM instance will be provided)")
 
-    def get_agent(self):
-        """Creates and returns the CrewAI Agent instance."""
+    def get_agent(self, llm_instance: BaseLLM = None):
+        """
+        Creates and returns the CrewAI Agent instance.
+
+        Args:
+            llm_instance: An optional pre-configured LLM instance to use.
+        """
         return Agent(
             role="C++ to Godot Conversion Strategist",
             goal=(
@@ -31,10 +36,10 @@ class MappingDefinerAgent:
             backstory=(
                 "You are a highly experienced software engineer specializing in cross-language and cross-engine code migration, particularly between C++ and game engines like Godot. You have a deep understanding of C++ idioms, Godot Engine 4.x architecture (GDScript/C#), SOLID principles, and common game development patterns. You can meticulously analyze code (including JSON structure definitions), devise effective porting strategies that respect architectural design (like separation of concerns), and break down complex conversion processes into precise, manageable implementation steps targeted at the correct components."
             ),
-            # llm=... # Let CrewAI handle LLM
+            llm=llm_instance,
             verbose=True,
             allow_delegation=False, # This agent performs the core mapping logic
-            # memory=True # Consider if memory is needed for retries on the same package
+            memory=False, # Mapping for each package should be independent
             # tools=[] # This agent primarily analyzes context and generates structured output
         )
 
