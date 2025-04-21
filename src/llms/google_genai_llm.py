@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional, Union, cast
 
 import google.generativeai as genai
 from typing import Tuple
-from google.generativeai.types import GenerationConfig, ContentDict, PartDict
+from google.generativeai.types import GenerationConfig, ContentDict, PartDict, RequestOptionsType
 from google.api_core.exceptions import GoogleAPIError
 
 from crewai.llms.base_llm import BaseLLM
@@ -25,6 +25,7 @@ class GoogleGenAI_LLM(BaseLLM):
     api_key: Optional[str] = None
     generation_config_dict: Optional[Dict[str, Any]] = None
     safety_settings_dict: Optional[List[Dict[str, Any]]] = None
+    request_timeout: Optional[int] = None # Timeout in seconds
     _model_instance: Optional[genai.GenerativeModel] = None
 
     def __init__(
@@ -35,7 +36,9 @@ class GoogleGenAI_LLM(BaseLLM):
         top_k: Optional[int] = None, # Note: google SDK uses float for top_k? Check docs. Let's assume int for now.
         max_output_tokens: Optional[int] = None,
         stop_sequences: Optional[List[str]] = None,
+        response_schema: Optional[Any] = None, # Added for schema definition (e.g., Pydantic model)
         api_key: Optional[str] = None, # Allow explicit key passing
+        timeout: Optional[int] = None,
         **kwargs: Any # Catch other potential LiteLLM/CrewAI params
     ):
         # Extract model name without prefix for Google SDK
@@ -52,26 +55,44 @@ class GoogleGenAI_LLM(BaseLLM):
             logger.warning("GEMINI_API_KEY not found in arguments or environment. Google API calls may fail.")
             # Consider raising an error if key is strictly required?
 
+        # Store schema if provided
+        self.response_schema = response_schema
+
         # Build GenerationConfig dictionary from relevant parameters
-        self.generation_config_dict = {
-            key: value
-            for key, value in {
+        gen_config_params = {
                 "temperature": temperature,
                 "top_p": top_p,
                 "top_k": top_k, # Google SDK might expect float, needs verification
                 "max_output_tokens": max_output_tokens,
                 "stop_sequences": stop_sequences,
                 # Add other supported genai.GenerationConfig fields if needed from kwargs
-            }.items()
+        }
+        # Conditionally add response_schema
+        if self.response_schema:
+            gen_config_params["response_schema"] = self.response_schema
+
+        self.generation_config_dict = {
+            key: value
+            for key, value in gen_config_params.items()
             if value is not None
         }
 
         # Handle safety settings if passed via kwargs (assuming CrewAI might pass them)
         self.safety_settings_dict = kwargs.get("safety_settings")
 
+        # Set timeout, reading from env var if not provided, with a default
+        default_timeout = 600 # Default to 10 minutes
+        try:
+            env_timeout = os.getenv("GEMINI_TIMEOUT")
+            self.request_timeout = timeout if timeout is not None else (int(env_timeout) if env_timeout else default_timeout)
+        except ValueError:
+            logger.warning(f"Invalid GEMINI_TIMEOUT value '{env_timeout}'. Using default: {default_timeout}s")
+            self.request_timeout = default_timeout
+
         logger.info(f"Initialized GoogleGenAI_LLM wrapper for model: {self.model_name}")
         logger.debug(f"Generation Config: {self.generation_config_dict}")
         logger.debug(f"Safety Settings: {self.safety_settings_dict}")
+        logger.debug(f"Request Timeout: {self.request_timeout}s")
 
     def _get_model(self) -> genai.GenerativeModel:
         """Initializes and returns the google-generativeai model instance."""
@@ -202,6 +223,9 @@ class GoogleGenAI_LLM(BaseLLM):
         logger.debug(f"Safety Settings for call: {safety_settings}")
         logger.debug(f"Tools for call: {genai_tools}")
 
+        # Prepare request options dictionary directly
+        request_options_dict = {"timeout": self.request_timeout}
+        logger.debug(f"Request Options Dict: {request_options_dict}")
 
         try:
             # Use generate_content for potentially multi-turn history
@@ -209,6 +233,7 @@ class GoogleGenAI_LLM(BaseLLM):
                 contents=converted_messages,
                 generation_config=gen_config, # Pass config without system_instruction
                 safety_settings=safety_settings,
+                request_options=request_options_dict, # Pass the dictionary directly
                 tools=genai_tools
                 # system_instruction is set on the model instance now
                 # TODO: Add tool_config if needed/provided
@@ -224,15 +249,23 @@ class GoogleGenAI_LLM(BaseLLM):
                  return f"Error: Call blocked by API. Reason: {block_reason}"
 
             # Extract text from the first candidate
-            # TODO: Handle function calls if response contains them
-            if response.candidates[0].content and response.candidates[0].content.parts:
-                 # Concatenate text parts, ignore others for now
-                 text_response = "".join(part.text for part in response.candidates[0].content.parts if hasattr(part, 'text'))
-                 return text_response
+            # --- Response Handling ---
+            # Check if the response has text directly (common for JSON mime type with schema)
+            if hasattr(response, 'text') and response.text:
+                logger.debug("Using response.text for output.")
+                return response.text
+            # Fallback to checking parts if response.text is not available or empty
+            elif response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
+                # Concatenate text parts, ignore others for now
+                # This handles the standard text generation case
+                text_response = "".join(part.text for part in response.candidates[0].content.parts if hasattr(part, 'text'))
+                logger.debug("Using concatenated text from response parts.")
+                return text_response
+            # TODO: Handle function calls if response contains them (response.candidates[0].content.parts[0].function_call)
             else:
-                 # Handle cases where response might be empty or structured differently (e.g., only function call)
-                 logger.warning(f"Gemini response candidate did not contain expected text parts. Response: {response}")
-                 return "" # Return empty string or handle appropriately
+                # Handle cases where response might be empty or structured differently
+                logger.warning(f"Gemini response candidate did not contain expected text parts or response.text. Response: {response}")
+                return "" # Return empty string or handle appropriately
 
         except GoogleAPIError as e:
             logger.error(f"Google API error during Gemini call: {e}", exc_info=True)

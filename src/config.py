@@ -29,7 +29,7 @@ REVIEWER_MODEL = os.getenv("REVIEWER_MODEL", "gemini/gemini-2.5-pro-exp-03-25")
 # These should ideally be passed via CLI arguments, but provide defaults or load from env
 CPP_PROJECT_DIR = os.getenv("CPP_PROJECT_DIR", "data/cpp_project")
 GODOT_PROJECT_DIR = os.getenv("GODOT_PROJECT_DIR", "input/godot_project")
-GODOT_DOCS_DIR = os.getenv("GODOT_DOCS_DIR", "input/godot_docs")
+INSTRUCTION_DIR = os.getenv("INSTRUCTION_DIR", "input/instructions")
 ANALYSIS_OUTPUT_DIR = os.getenv("ANALYSIS_OUTPUT_DIR", "output/analysis")
 LOG_DIR = os.getenv("LOG_DIR", "logs")
 
@@ -43,6 +43,16 @@ MAX_RETRIES = int(os.getenv("MAX_RETRIES", 5))
 INITIAL_BACKOFF_DELAY = float(os.getenv("INITIAL_BACKOFF_DELAY", 1.0)) # seconds
 MAX_BACKOFF_DELAY = float(os.getenv("MAX_BACKOFF_DELAY", 60.0)) # seconds
 BACKOFF_JITTER = float(os.getenv("BACKOFF_JITTER", 0.1)) # Max jitter fraction (e.g., 0.1 = +/- 10%)
+
+# --- Gemini Specific Settings ---
+# Timeout for Google Gemini API calls in seconds
+default_gemini_timeout = 60*10 # 10 minutes
+try:
+    GEMINI_TIMEOUT = int(os.getenv("GEMINI_TIMEOUT", default_gemini_timeout))
+except ValueError:
+    logger.warning(f"Invalid GEMINI_TIMEOUT value '{os.getenv('GEMINI_TIMEOUT')}'. Using default: {default_gemini_timeout}s")
+    GEMINI_TIMEOUT = default_gemini_timeout
+
 
 # --- Conversion Settings ---
 TARGET_LANGUAGE = os.getenv("TARGET_LANGUAGE", "GDScript") # Default, override via CLI
@@ -63,28 +73,28 @@ if EXCLUDE_FOLDERS:
 
 # --- Context & Token Management ---
 # Max tokens allowed for the context assembled *before* adding the main prompt
-MAX_CONTEXT_TOKENS = int(os.getenv("MAX_CONTEXT_TOKENS", 1_000_000)) # Gemini 2.5 Pro has 1M, leave buffer
+MAX_CONTEXT_TOKENS = int(os.getenv("MAX_CONTEXT_TOKENS", 700_000)) # Gemini 2.5 Pro has 1M, leave buffer
 # Buffer subtracted from MAX_CONTEXT_TOKENS to leave room for prompt/response overhead
-PROMPT_TOKEN_BUFFER = int(os.getenv("PROMPT_TOKEN_BUFFER", 5000))
+PROMPT_TOKEN_BUFFER = int(os.getenv("PROMPT_TOKEN_BUFFER", 3000))
 # Ratio of MAX_CONTEXT_TOKENS allocated to file content vs other context items
 CONTEXT_FILE_BUDGET_RATIO = float(os.getenv("CONTEXT_FILE_BUDGET_RATIO", 0.9)) # 90% for files
 
 # --- Package Identification Settings (Step 2) ---
 # Max estimated tokens for a single package's content/interface (used for splitting large clusters)
-MAX_PACKAGE_SIZE_TOKENS = int(os.getenv("MAX_PACKAGE_SIZE_TOKENS", 120_000))
+MAX_PACKAGE_SIZE_TOKENS = int(os.getenv("MAX_PACKAGE_SIZE_TOKENS", 80_000))
 # Minimum number of files for a cluster to be considered a valid final package
-MIN_PACKAGE_SIZE_FILES = int(os.getenv("MIN_PACKAGE_SIZE_FILES", 10))
+MIN_PACKAGE_SIZE_FILES = int(os.getenv("MIN_PACKAGE_SIZE_FILES", 5))
 # Ratio of LLM's context window to use for description/evaluation calls
-LLM_DESC_MAX_TOKENS_RATIO = float(os.getenv("LLM_DESC_MAX_TOKENS_RATIO", 0.5))
+LLM_DESC_MAX_TOKENS_RATIO = float(os.getenv("LLM_DESC_MAX_TOKENS_RATIO", 0.75))
 # Maximum number of iterations for the package merging loop
-MAX_MERGE_ITERATIONS = int(os.getenv("MAX_MERGE_ITERATIONS", 5))
+MAX_MERGE_ITERATIONS = int(os.getenv("MAX_MERGE_ITERATIONS", 10))
 # Minimum score (based on graph connectivity) for a merge candidate pair to be considered
-MERGE_SCORE_THRESHOLD = float(os.getenv("MERGE_SCORE_THRESHOLD", 0.5))
+MERGE_SCORE_THRESHOLD = float(os.getenv("MERGE_SCORE_THRESHOLD", 0.7))
 
 # --- Generation Settings ---
-DEFAULT_TEMPERATURE = float(os.getenv("DEFAULT_TEMPERATURE", 0.7))
+DEFAULT_TEMPERATURE = float(os.getenv("DEFAULT_TEMPERATURE", 0.8))
 DEFAULT_TOP_P = float(os.getenv("DEFAULT_TOP_P", 0.95)) # Example, adjust as needed
-DEFAULT_TOP_K = int(os.getenv("DEFAULT_TOP_K", 40)) # Example, adjust as needed
+DEFAULT_TOP_K = int(os.getenv("DEFAULT_TOP_K", 20)) # Example, adjust as needed
 
 # --- Ensure output/generated directories exist ---
 # Input directories (CPP_PROJECT_DIR, GODOT_PROJECT_DIR, GODOT_DOCS_DIR) are expected to be provided.

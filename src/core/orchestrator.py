@@ -177,8 +177,19 @@ class Orchestrator:
 
     # --- Public Methods for Pipeline Control (called by CLI) ---
 
-    def run_step(self, step_name: str, package_ids: Optional[List[str]] = None, **kwargs) -> bool:
-        """Executes a specific step by name."""
+    def run_step(self, step_name: str, package_ids: Optional[List[str]] = None, force: bool = False, **kwargs) -> bool:
+        """
+        Executes a specific step by name.
+
+        Args:
+            step_name (str): The name of the step to run (e.g., "step1", "step2").
+            package_ids (Optional[List[str]]): Specific package IDs to process. If None, processes eligible packages.
+            force (bool): If True, attempts to force reprocessing of packages even if they are in a completed or failed state for this step.
+            **kwargs: Additional keyword arguments specific to the step executor (e.g., feedback_override for step4).
+
+        Returns:
+            bool: True if the step execution was successful (or had nothing to do), False otherwise.
+        """
         executor = self.executors.get(step_name)
         if not executor:
             logger.error(f"No executor found for step: {step_name}")
@@ -188,7 +199,10 @@ class Orchestrator:
         if step_name in ["step2", "step3", "step4", "step5"]:
              self._reload_context_manager_graph()
 
+        # Pass the force flag and other kwargs down to the executor
         try:
+            # Add force to the kwargs being passed to the executor
+            kwargs['force'] = force
             return executor.execute(package_ids=package_ids, **kwargs)
         except Exception as e:
             logger.error(f"An unexpected error occurred running step '{step_name}': {e}", exc_info=True)

@@ -1,8 +1,9 @@
 # src/core/state_manager.py
 import os
 import json
+from pathlib import Path # Use Pathlib
 from src.logger_setup import get_logger
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Union # Added Union, Path
 
 logger = get_logger(__name__)
 
@@ -20,13 +21,15 @@ class StateManager:
             state_filename (str): The name of the state file.
         """
         self.analysis_dir = os.path.abspath(analysis_dir)
-        self.state_file_path = os.path.join(self.analysis_dir, state_filename)
+        # Use Path objects internally
+        self.analysis_dir = Path(analysis_dir).resolve()
+        self.state_file_path = self.analysis_dir / state_filename
         self.state: Dict[str, Any] = self._load_state()
-        logger.info(f"StateManager initialized. State file: {self.state_file_path}")
+        logger.info(f"StateManager initialized. State file: {self.state_file_path}. Analysis dir: {self.analysis_dir}")
 
     def _load_state(self) -> Dict[str, Any]:
-        """Loads the orchestrator state from the state file."""
-        if os.path.exists(self.state_file_path):
+        """Loads the orchestrator state from the state file using Pathlib."""
+        if self.state_file_path.exists():
             try:
                 with open(self.state_file_path, 'r', encoding='utf-8') as f:
                     state = json.load(f)
@@ -53,10 +56,10 @@ class StateManager:
         }
 
     def save_state(self):
-        """Saves the current orchestrator state to the state file."""
+        """Saves the current orchestrator state to the state file using Pathlib."""
         try:
             # Ensure analysis directory exists before saving
-            os.makedirs(self.analysis_dir, exist_ok=True)
+            self.analysis_dir.mkdir(parents=True, exist_ok=True)
             with open(self.state_file_path, 'w', encoding='utf-8') as f:
                 json.dump(self.state, f, indent=4)
             logger.debug(f"Saved state to {self.state_file_path}")
@@ -167,3 +170,84 @@ class StateManager:
     def get_package_processing_order(self) -> Optional[List[str]]:
         """Retrieves the calculated package processing order from the state."""
         return self.state.get('package_processing_order')
+
+    # --- Artifact Management Methods ---
+
+    def save_artifact(self, artifact_filename: str, content: Union[str, Dict, List], is_json: bool = True) -> bool:
+        """
+        Saves content to an artifact file within the analysis directory.
+
+        Args:
+            artifact_filename (str): The filename (relative to analysis_dir).
+            content (Union[str, Dict, List]): The content to save.
+            is_json (bool): If True and content is dict/list, serialize as JSON. Defaults to True.
+
+        Returns:
+            bool: True on success, False on failure.
+        """
+        artifact_path = self.analysis_dir / artifact_filename
+        logger.debug(f"Attempting to save artifact to: {artifact_path}")
+        try:
+            # Ensure analysis directory exists
+            self.analysis_dir.mkdir(parents=True, exist_ok=True)
+
+            with open(artifact_path, 'w', encoding='utf-8') as f:
+                if is_json and isinstance(content, (dict, list)):
+                    json.dump(content, f, indent=4)
+                    logger.debug(f"Saved JSON artifact: {artifact_filename}")
+                elif isinstance(content, str):
+                    f.write(content)
+                    logger.debug(f"Saved text artifact: {artifact_filename}")
+                else:
+                    logger.error(f"Invalid content type for artifact '{artifact_filename}'. Expected str, dict, or list, got {type(content)}.")
+                    return False
+            return True
+        except (IOError, TypeError, json.JSONDecodeError) as e:
+            logger.error(f"Failed to save artifact '{artifact_filename}' to {artifact_path}: {e}", exc_info=True)
+            return False
+        except Exception as e:
+            logger.error(f"Unexpected error saving artifact '{artifact_filename}': {e}", exc_info=True)
+            return False
+
+    def load_artifact(self, artifact_filename: str, expect_json: bool = True) -> Optional[Union[str, Dict, List]]:
+        """
+        Loads content from an artifact file within the analysis directory.
+
+        Args:
+            artifact_filename (str): The filename (relative to analysis_dir).
+            expect_json (bool): If True, attempt to parse the content as JSON. Defaults to True.
+
+        Returns:
+            Optional[Union[str, Dict, List]]: The loaded content (string or parsed JSON),
+                                              or None if the file doesn't exist or loading/parsing fails.
+        """
+        artifact_path = self.analysis_dir / artifact_filename
+        if not artifact_path.exists():
+            logger.debug(f"Artifact file not found: {artifact_path}")
+            return None
+
+        logger.debug(f"Attempting to load artifact from: {artifact_path}")
+        try:
+            with open(artifact_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            if expect_json:
+                try:
+                    parsed_json = json.loads(content)
+                    logger.debug(f"Loaded and parsed JSON artifact: {artifact_filename}")
+                    return parsed_json
+                except json.JSONDecodeError as json_err:
+                    logger.error(f"Failed to parse artifact '{artifact_filename}' as JSON: {json_err}")
+                    # Optionally return the raw string content if JSON parsing fails but reading succeeded?
+                    # For now, return None to indicate failure to get expected type.
+                    return None
+            else:
+                logger.debug(f"Loaded text artifact: {artifact_filename}")
+                return content # Return raw string content
+
+        except IOError as e:
+            logger.error(f"Failed to read artifact file '{artifact_filename}' from {artifact_path}: {e}", exc_info=True)
+            return None
+        except Exception as e:
+            logger.error(f"Unexpected error loading artifact '{artifact_filename}': {e}", exc_info=True)
+            return None

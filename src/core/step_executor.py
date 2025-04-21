@@ -38,13 +38,14 @@ class StepExecutor(ABC):
         logger.debug(f"Initialized {self.__class__.__name__} with LLM Configs: {list(llm_configs.keys())}, Tools: {[t.__name__ for t in tools.keys()]}")
 
     @abstractmethod
-    def execute(self, package_ids: Optional[List[str]] = None, **kwargs) -> bool:
+    def execute(self, package_ids: Optional[List[str]] = None, force: bool = False, **kwargs) -> bool:
         """
         Executes the specific workflow step.
 
         Args:
             package_ids (Optional[List[str]]): Specific package IDs to process (if applicable).
                                                 If None, process all eligible packages for the step.
+            force (bool): If True, attempts to force reprocessing of packages even if they are in a completed or failed state for this step. Defaults to False.
             **kwargs: Additional arguments specific to the step.
 
         Returns:
@@ -52,7 +53,7 @@ class StepExecutor(ABC):
         """
         pass
 
-    def _get_eligible_packages(self, target_status: str, specific_ids: Optional[List[str]] = None) -> List[str]:
+    def _get_eligible_packages(self, target_status: str, specific_ids: Optional[List[str]] = None, force: bool = False) -> List[str]:
         """
         Helper method to find eligible packages based on their status.
         """
@@ -62,18 +63,38 @@ class StepExecutor(ABC):
             logger.warning(f"No work packages found in state to check eligibility for status '{target_status}'.")
             return []
 
+        # Define the set of statuses considered "terminal" for a step, which might be overridden by 'force'
+        # This might need adjustment based on the specific step's logic
+        terminal_statuses = {'processed', 'completed'} # Add step-specific completed statuses like 'structure_defined', 'mapping_defined' etc. in subclasses if needed
+        failed_statuses = {status for status in self.state_manager.get_all_packages().values() if status and 'failed' in status} # Dynamically get all failed statuses
+
         for pkg_id, pkg_data in packages.items():
             if specific_ids and pkg_id not in specific_ids:
                 continue # Skip if specific IDs are given and this isn't one of them
 
             current_status = pkg_data.get('status')
-            if current_status == target_status:
-                eligible.append(pkg_id)
-            elif specific_ids and current_status != target_status:
-                 # If specific IDs were requested, warn if they aren't in the right state
-                 logger.warning(f"Requested package '{pkg_id}' is not in the required status '{target_status}' (current: '{current_status}'). Skipping.")
 
-        logger.debug(f"Found {len(eligible)} packages eligible for status '{target_status}' (Specific IDs requested: {specific_ids})")
+            is_target = (current_status == target_status)
+            is_failed = (current_status in failed_statuses)
+            # Add more checks here if steps have multiple valid starting statuses or terminal statuses
+
+            if is_target:
+                 eligible.append(pkg_id)
+                 logger.debug(f"Package '{pkg_id}' is eligible (status: '{current_status}').")
+            elif force and is_failed:
+                 # If force is True and the package failed this step previously, consider it eligible for retry
+                 logger.info(f"Forcing eligibility for previously failed package '{pkg_id}' (status: '{current_status}').")
+                 # Optionally reset the status here or let the step executor handle it
+                 # self.state_manager.update_package_state(pkg_id, target_status, error=None) # Example reset
+                 eligible.append(pkg_id)
+            elif specific_ids and not is_target:
+                 # If specific IDs were requested, warn if they aren't in the right state (and not forced)
+                 logger.warning(f"Requested package '{pkg_id}' is not in the required status '{target_status}' (current: '{current_status}') and force=False. Skipping.")
+            # else: # Package is neither target status nor forced failed status
+                 # logger.debug(f"Package '{pkg_id}' is not eligible (status: '{current_status}', target: '{target_status}', force: {force}).")
+
+
+        logger.debug(f"Found {len(eligible)} packages eligible for status '{target_status}' (Specific IDs requested: {specific_ids}, Force: {force})")
         return eligible
 
     def _get_llm_config(self, llm_role: str) -> Optional[Dict[str, Any]]:

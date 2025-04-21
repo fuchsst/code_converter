@@ -25,16 +25,14 @@ class MappingDefinerAgent:
             llm_instance: An optional pre-configured LLM instance to use.
         """
         return Agent(
-            role="C++ to Godot Conversion Strategist",
+            role="C++ to Godot Conversion Planner",
             goal=(
-                "Analyze the provided C++ work package (file list, code snippets), the proposed "
-                "Godot project structure (**JSON format**, designed with SOLID principles), and the target language "
-                f"({config.TARGET_LANGUAGE}). Your goal is twofold:\n"
-                "1.  **Define a Mapping Strategy:** Create a concise Markdown document outlining the high-level approach for converting the C++ code to the proposed Godot structure (defined in the input JSON). Describe how key C++ classes, functions, and patterns will map to the proposed Godot nodes, scenes, and **specifically the decoupled scripts** defined in the structure. Emphasize how the mapping maintains the separation of concerns established in the structure. Reference elements from the input JSON structure where appropriate.\n"
-                "2.  **Generate Actionable Task List:** Create a detailed JSON list of specific, granular tasks required to implement the conversion based on the strategy and the input JSON structure. **Ensure each task targets the correct, specific Godot script/node according to the SOLID-based structure proposed in Step 3.** Tasks should be small enough to be handled by a code generation/editing agent and include details like: target Godot file (aligning with the input structure), specific function/method to create/modify, corresponding C++ source file/function for reference, and brief instructions on the required logic or mapping."
+                f"Analyze the provided context for a C++ work package, including C++ code snippets, the proposed Godot structure, general instructions, work-package summaries, existing Godot files, potentially existing conversion tasks and existing Godot file content. Your goal is to generate TWO outputs: "
+                f"1. A **Mapping Strategy (Markdown)** outlining the high-level conversion approach to {config.TARGET_LANGUAGE}, referencing the proposed Godot structure and addressing any existing mapping/files provided. "
+                f"2. A **Structured Task List (JSON)** conforming strictly to the `MappingOutput` Pydantic model (with `package_id`, `task_groups`, and detailed `tasks` including `task_title`, `task_description`, `input_source_files`, `output_godot_file`). The tasks must be granular and map C++ functionality to the specific Godot files defined in the proposed structure."
             ),
             backstory=(
-                "You are a highly experienced software engineer specializing in cross-language and cross-engine code migration, particularly between C++ and game engines like Godot. You have a deep understanding of C++ idioms, Godot Engine 4.x architecture (GDScript/C#), SOLID principles, and common game development patterns. You can meticulously analyze code (including JSON structure definitions), devise effective porting strategies that respect architectural design (like separation of concerns), and break down complex conversion processes into precise, manageable implementation steps targeted at the correct components."
+                "You are a meticulous software architect specializing in migrating C++ projects to Godot Engine 4.x. You excel at understanding complex C++ codebases and designing corresponding Godot structures based on SOLID principles. Your strength lies in breaking down the conversion process into logical, feature-based task groups and highly specific, actionable tasks. You carefully consider existing project context, including previously generated structures or mappings, to ensure consistency and refinement. You always output your plan in the precise format required: a Markdown strategy followed by a structured JSON task list."
             ),
             llm=llm_instance,
             verbose=True,

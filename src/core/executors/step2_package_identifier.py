@@ -15,9 +15,9 @@ import src.config as global_config # Use alias for clarity
 from src.partitioning.louvain_partitioner import LouvainPartitioner
 from src.partitioning.balance_refiner import refine_partitions_for_balance, calculate_partition_stats
 from src.agents.package_describer import PackageDescriberAgent
-from src.tasks.describe_package import DescribePackageTask
+from src.tasks.describe_package import DescribePackageTask, PackageDescriptionOutput
 from src.agents.package_refiner import PackageRefinementAgent
-from src.tasks.refine_descriptions import RefineDescriptionsTask
+from src.tasks.refine_descriptions import RefineDescriptionsTask, RefinedDescriptionsOutput
 from crewai import LLM as CrewAI_LLM # Alias default LLM
 from src.llms.google_genai_llm import GoogleGenAI_LLM
 from src.utils.json_utils import parse_json_from_string
@@ -149,42 +149,71 @@ class Step2Executor(StepExecutor):
 
 
     # --- Main Execution Logic ---
-    def execute(self, package_ids: Optional[List[str]] = None, **kwargs) -> bool:
+    def execute(self, package_ids: Optional[List[str]] = None, force: bool = False, **kwargs) -> bool:
         """
         Runs Step 2: Identifies packages using Louvain, refines for balance,
         and generates descriptions using a CrewAI agent.
+
+        Args:
+            package_ids (Optional[List[str]]): Not typically used in Step 2 as it partitions all code.
+            force (bool): If True, forces re-partitioning and description even if step2_complete.
+            **kwargs: Additional arguments (unused).
         """
-        logger.info("--- Starting Step 2 Execution: Package Identification & Description ---")
-        self.state_manager.update_workflow_status('running_step2')
+        logger.info(f"--- Starting Step 2 Execution: Package Identification & Description (Force={force}) ---")
+
+        # --- Force Handling ---
+        # If force=True, we essentially ignore existing package data and re-run partitioning.
+        # We also need to reset the workflow status if it was already 'step2_complete'.
+        current_workflow_status = self.state_manager.get_state().get('workflow_status')
+        if force:
+            logger.warning("Force flag is set. Re-running Step 2 partitioning and description generation.")
+            # Reset relevant state? Clear existing packages?
+            self.context_manager.save_packages_data({}, None) # Clear saved packages.json
+            self.state_manager.set_packages({}) # Clear packages in state
+            self.state_manager.set_package_processing_order(None) # Clear order in state
+            if current_workflow_status == 'step2_complete':
+                 self.state_manager.update_workflow_status('running_step2_forced') # Indicate forced run
+            else:
+                 self.state_manager.update_workflow_status('running_step2')
+            resuming_from_file = False # Ensure we don't resume
+            current_packages_data = {} # Start fresh
+        else:
+            # Normal execution: check if resuming is possible
+            self.state_manager.update_workflow_status('running_step2')
+            # Use package data loaded by ContextManager during its initialization
+            current_packages_data = self.context_manager.packages_data.copy()
+            if current_packages_data:
+                logger.info("Resuming package description using data from ContextManager.")
+                resuming_from_file = True
+            else:
+                logger.info("No valid existing package data found in ContextManager. Performing full partitioning.")
+                resuming_from_file = False
+
         success = False
-        resuming_from_file = False
-        # Use package data loaded by ContextManager during its initialization
-        # Make a copy to modify during execution, save back via ContextManager
-        current_packages_data = self.context_manager.packages_data.copy()
         node_weights = {} # Initialize node_weights
 
-        if current_packages_data: # Check if the loaded data is not empty
-            logger.info("Resuming package description using data from ContextManager.")
-            resuming_from_file = True
-            # Need node weights even when resuming for 'total_tokens'
+        # Calculate node weights if resuming (needed for total_tokens display/potential future use)
+        if resuming_from_file:
+            all_files_in_loaded_packages = set()
+            for pkg_data in current_packages_data.values():
+                if isinstance(pkg_data.get("files"), list):
+                    all_files_in_loaded_packages.update(pkg_data["files"])
             all_files_in_loaded_packages = set()
             for pkg_data in current_packages_data.values():
                 if isinstance(pkg_data.get("files"), list):
                     all_files_in_loaded_packages.update(pkg_data["files"])
             if not all_files_in_loaded_packages:
-                 logger.warning("Loaded packages data contains no files. Cannot calculate node weights.")
+                 logger.warning("Resuming: Loaded packages data contains no files. Cannot calculate node weights.")
             else:
-                 logger.info("Calculating node weights for files in loaded packages...")
+                 logger.info("Resuming: Calculating node weights for files in loaded packages...")
                  node_weights = self._get_node_weights(list(all_files_in_loaded_packages))
-        else:
-            logger.info("No valid existing package data found in ContextManager. Performing full partitioning.")
-            resuming_from_file = False
-            # Proceed with graph building and partitioning
 
+        # --- Graph Loading ---
+        # Graph is needed for partitioning (if not resuming) and potentially for description context/ordering
         include_graph_data = self.context_manager.include_graph
-        if not include_graph_data and not resuming_from_file: # Only fail if not resuming and graph is needed
-            logger.error("Include graph data is missing and not resuming. Cannot run Step 2.")
-            self.state_manager.update_workflow_status('failed_step2', "Include graph data missing.")
+        if not include_graph_data and not resuming_from_file: # Only fail if not resuming and graph is needed for partitioning
+            logger.error("Include graph data is missing and not resuming. Cannot run partitioning in Step 2.")
+            self.state_manager.update_workflow_status('failed_step2', "Include graph data missing for partitioning.")
             return False
 
         try:
@@ -252,10 +281,16 @@ class Step2Executor(StepExecutor):
             if analyzer_llm_config:
                 model_identifier = analyzer_llm_config.get("model", "")
                 try:
-                    if model_identifier.startswith("gemini/"):
-                        analyzer_llm_instance = GoogleGenAI_LLM(**analyzer_llm_config)
-                        logger.info(f"Instantiated custom GoogleGenAI_LLM for role 'analyzer': {model_identifier}")
-                    else:
+                     if model_identifier.startswith("gemini/"):
+                         # Pass timeout from the imported config module
+                         analyzer_llm_config['timeout'] = global_config.GEMINI_TIMEOUT
+                         analyzer_llm_config['response_schema'] = PackageDescriptionOutput
+                         analyzer_llm_config['response_mime_type'] = "application/json"
+                         analyzer_llm_instance = GoogleGenAI_LLM(**analyzer_llm_config)
+                         logger.info(f"Instantiated custom GoogleGenAI_LLM for role 'analyzer': {model_identifier} with timeout {global_config.GEMINI_TIMEOUT}s, JSON output, and PackageDescriptionOutput schema")
+                     else:
+                         # Default CrewAI LLM might not support 'timeout' directly, pass only relevant args
+                        # Filter analyzer_llm_config if necessary for CrewAI_LLM
                         analyzer_llm_instance = CrewAI_LLM(**analyzer_llm_config)
                         logger.info(f"Instantiated default crewai.LLM for role 'analyzer': {model_identifier}")
                 except Exception as e:
@@ -336,6 +371,7 @@ class Step2Executor(StepExecutor):
                      logger.debug(f"Using context type '{content_type}' for {package_name} description.")
 
                      # Create the task
+                     # The DescribePackageTask sets output_json=PackageDescriptionOutput, which acts as validation/fallback.
                      describe_task = task_creator.create_task(describer_agent, files, context_str)
 
                      # Create and run the Crew, passing the specific LLM instance
@@ -438,68 +474,93 @@ class Step2Executor(StepExecutor):
                  if analyzer_llm_instance and final_packages_output:
                      logger.info("--- Starting Package Description Refinement Step ---")
                      try:
-                         # Use the same LLM instance for refinement for consistency, or configure separately if needed
-                         refiner_llm_instance = analyzer_llm_instance
-                         refiner_agent_creator = PackageRefinementAgent()
-                         refiner_agent = refiner_agent_creator.get_agent(llm_instance=refiner_llm_instance)
-                         refinement_task_creator = RefineDescriptionsTask()
-
-                         # Prepare context - use the state accumulated so far
-                         refinement_context = final_packages_output
-
-                         refine_task = refinement_task_creator.create_task(refiner_agent, refinement_context)
-
-                         refinement_crew = Crew(
-                             agents=[refiner_agent],
-                             tasks=[refine_task],
-                             process=Process.sequential,
-                             llm=refiner_llm_instance,
-                             verbose=1 # Or configure via self.config
-                         )
-
-                         logger.info("Kicking off refinement crew...")
-                         refinement_result = refinement_crew.kickoff()
-                         raw_refinement_output = None
-
-                         if hasattr(refinement_result, 'raw') and isinstance(refinement_result.raw, str):
-                             raw_refinement_output = refinement_result.raw
-                         elif isinstance(refinement_result, str):
-                             raw_refinement_output = refinement_result
+                         # --- Instantiate Refiner LLM ---
+                         # Use a separate instance configured for the refinement task's output schema
+                         refiner_llm_instance = None
+                         if analyzer_llm_config: # Check if base config exists
+                             model_identifier = analyzer_llm_config.get("model", "")
+                             # Create a distinct config for the refiner
+                             refiner_config = analyzer_llm_config.copy() # Start with analyzer config, includes timeout etc.
+                             try:
+                                 if model_identifier.startswith("gemini/"):
+                                     # Configure specifically for RefinedDescriptionsOutput schema
+                                     refiner_config['response_schema'] = RefinedDescriptionsOutput
+                                     refiner_config['response_mime_type'] = "application/json" # Ensure mime type
+                                     refiner_llm_instance = GoogleGenAI_LLM(**refiner_config)
+                                     logger.info(f"Instantiated separate GoogleGenAI_LLM for refinement: {model_identifier} with RefinedDescriptionsOutput schema")
+                                 else:
+                                     # Instantiate standard CrewAI LLM for refinement if not Gemini
+                                     refiner_llm_instance = CrewAI_LLM(**refiner_config)
+                                     logger.info(f"Instantiated separate default crewai.LLM for refinement: {model_identifier}")
+                             except Exception as e_refine:
+                                 logger.error(f"Failed to instantiate separate LLM for refinement ({model_identifier}): {e_refine}", exc_info=True)
+                                 refiner_llm_instance = None # Fallback
                          else:
-                             logger.warning(f"Refinement crew returned unexpected result type: {type(refinement_result)}")
+                              logger.error("Analyzer LLM config was missing, cannot create separate refiner LLM instance.")
 
-                         if raw_refinement_output:
-                             refined_descriptions_dict = parse_json_from_string(raw_refinement_output)
-
-                             if isinstance(refined_descriptions_dict, dict):
-                                 logger.info(f"Successfully parsed refinement results ({len(refined_descriptions_dict)} entries). Applying updates...")
-                                 update_count = 0
-                                 for pkg_name, refined_desc in refined_descriptions_dict.items():
-                                     if pkg_name in final_packages_output and isinstance(refined_desc, str):
-                                         if final_packages_output[pkg_name]['description'] != refined_desc:
-                                             logger.debug(f"Updating description for {pkg_name}")
-                                             final_packages_output[pkg_name]['description'] = refined_desc
-                                             update_count += 1
-                                         else:
-                                              logger.debug(f"Refined description for {pkg_name} is the same as initial. Skipping update.")
-                                     else:
-                                         logger.warning(f"Skipping refinement update for '{pkg_name}': Package not found in original data or refined description is not a string.")
-                                 logger.info(f"Applied {update_count} refined descriptions.")
-                                 # Save the refined data immediately
-                                 logger.info("Saving updated package data with refined descriptions via ContextManager...")
-                                 self.context_manager.save_packages_data(final_packages_output)
-                             else:
-                                 logger.error("Failed to parse refinement result dictionary from LLM output.")
+                         # Proceed only if refiner LLM was successfully created
+                         if not refiner_llm_instance:
+                              logger.error("Skipping refinement step because the refiner LLM instance could not be created.")
                          else:
-                             logger.error("Refinement crew did not return a usable string output.")
+                              # --- Refinement Crew Setup ---
+                              refiner_agent_creator = PackageRefinementAgent()
+                              refiner_agent = refiner_agent_creator.get_agent(llm_instance=refiner_llm_instance) # Use dedicated instance
+                              refinement_task_creator = RefineDescriptionsTask()
+
+                              # Prepare context - use the state accumulated so far
+                              refinement_context = final_packages_output
+
+                              # The RefineDescriptionsTask sets output_json=RefinedDescriptionsOutput for validation/fallback
+                              refine_task = refinement_task_creator.create_task(refiner_agent, refinement_context)
+
+                              refinement_crew = Crew(
+                                  agents=[refiner_agent],
+                                  tasks=[refine_task],
+                                  process=Process.sequential,
+                                  llm=refiner_llm_instance,
+                                  verbose=1 # Or configure via self.config
+                              )
+
+                              logger.info("Kicking off refinement crew...")
+                              refinement_result = refinement_crew.kickoff()
+                              raw_refinement_output = None
+
+                              if hasattr(refinement_result, 'raw') and isinstance(refinement_result.raw, str):
+                                  raw_refinement_output = refinement_result.raw
+                              elif isinstance(refinement_result, str):
+                                  raw_refinement_output = refinement_result
+                              else:
+                                  logger.warning(f"Refinement crew returned unexpected result type: {type(refinement_result)}")
+
+                              if raw_refinement_output:
+                                  refined_descriptions_dict = parse_json_from_string(raw_refinement_output)
+
+                                  if isinstance(refined_descriptions_dict, dict):
+                                      logger.info(f"Successfully parsed refinement results ({len(refined_descriptions_dict)} entries). Applying updates...")
+                                      update_count = 0
+                                      for pkg_name, refined_desc in refined_descriptions_dict.items():
+                                          if pkg_name in final_packages_output and isinstance(refined_desc, str):
+                                              if final_packages_output[pkg_name]['description'] != refined_desc:
+                                                  logger.debug(f"Updating description for {pkg_name}")
+                                                  final_packages_output[pkg_name]['description'] = refined_desc
+                                                  update_count += 1
+                                              else:
+                                                   logger.debug(f"Refined description for {pkg_name} is the same as initial. Skipping update.")
+                                          else:
+                                              logger.warning(f"Skipping refinement update for '{pkg_name}': Package not found in original data or refined description is not a string.")
+                                      logger.info(f"Applied {update_count} refined descriptions.")
+                                      # Save the refined data immediately
+                                      logger.info("Saving updated package data with refined descriptions via ContextManager...")
+                                      self.context_manager.save_packages_data(final_packages_output)
+                                  else:
+                                      logger.error("Failed to parse refinement result dictionary from LLM output.")
+                              else:
+                                  logger.error("Refinement crew did not return a usable string output.")
+                              # --- End Refinement Crew Execution ---
 
                      except Exception as e:
                          logger.error(f"An error occurred during the refinement step: {e}", exc_info=True)
-                         # Continue without refinement if it fails
-
-                     logger.info("--- Finished Package Description Refinement Step ---")
-                 elif not analyzer_llm_instance:
-                     logger.info("Skipping refinement step as initial description LLM ('analyzer') was not available.")
+                         # Continue without refinement if it fails, error is logged
                  elif not final_packages_output:
                       logger.info("Skipping refinement step as there are no packages to refine.")
                  # --- END: Refinement Step ---
