@@ -8,6 +8,7 @@ from typing import Tuple
 from google.generativeai.types import GenerationConfig, ContentDict, PartDict, RequestOptionsType
 from google.api_core.exceptions import GoogleAPIError
 
+from pydantic import BaseModel, RootModel # Import Pydantic base classes
 from crewai.llms.base_llm import BaseLLM
 from src.logger_setup import get_logger
 
@@ -275,19 +276,34 @@ class GoogleGenAI_LLM(BaseLLM):
             raise RuntimeError(f"Unexpected error during Gemini call: {e}") from e
 
     def get_context_window_size(self) -> int:
-        """Returns context window size based on known Gemini models (approximate)."""
-        # TODO: Find a more reliable way to get this, maybe via model listing?
-        if "1.5-pro" in self.model_name:
-            return 2_000_000 # Or 1M depending on specific version? Check latest docs.
-        elif "1.5-flash" in self.model_name:
-            return 1_000_000
-        elif "flash" in self.model_name: # Older flash
-             return 32_000 # Approximation, check specific model
-        elif "pro" in self.model_name: # Older pro
-             return 32_000 # Approximation
-        else:
-            logger.warning(f"Unknown context window size for model {self.model_name}. Defaulting to 32000.")
-            return 32_000 # Default fallback
+        """
+        Retrieves the context window size (input token limit) for the model
+        by calling the Google Generative AI API. Falls back to a default
+        value if the API call fails or the model information is unavailable.
+        """
+        default_size = 32_000
+        model_identifier = f'models/{self.model_name}'
+        try:
+            # Ensure API key is configured before making the call
+            # (Relying on the configuration done in _get_model or globally)
+            if not self.api_key and not os.getenv("GEMINI_API_KEY"):
+                 raise ValueError("GEMINI_API_KEY must be set in environment or passed to constructor to fetch model info.")
+
+            model_info = genai.get_model(model_identifier)
+            if model_info and hasattr(model_info, 'input_token_limit'):
+                logger.debug(f"Retrieved input_token_limit for {model_identifier}: {model_info.input_token_limit}")
+                return model_info.input_token_limit
+            else:
+                logger.warning(f"Could not retrieve input_token_limit for model {model_identifier}. Response: {model_info}. Defaulting to {default_size}.")
+                return default_size
+        except GoogleAPIError as e:
+             # Handle specific API errors, e.g., NotFound if the model doesn't exist
+             logger.warning(f"Google API error retrieving model info for {model_identifier}: {e}. Defaulting to {default_size}.")
+             return default_size
+        except Exception as e:
+            # Catch other potential exceptions during the API call
+            logger.warning(f"Failed to retrieve context window size for model {model_identifier} via API: {e}. Defaulting to {default_size}.")
+            return default_size
 
     # Override other methods if needed, e.g., supports_function_calling
     # def supports_function_calling(self) -> bool:

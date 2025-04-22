@@ -1,18 +1,20 @@
 # src/tasks/refine_descriptions.py
 from crewai import Task, Agent
-from typing import Dict, Any
+from typing import Dict, Any, List
 from src.logger_setup import get_logger
 import json
 from collections import Counter
-from pydantic import BaseModel, Field, RootModel # Import Pydantic components
+from pydantic import BaseModel, Field
 
 logger = get_logger(__name__)
 
 # --- Pydantic Model for Structured Output ---
 # We expect a dictionary where keys are package names (strings)
 # and values are the refined description strings.
-class RefinedDescriptionsOutput(RootModel[Dict[str, str]]):
-    root: Dict[str, str] = Field(..., description="A dictionary mapping package names to their refined descriptions.")
+class RefinedDescriptionsOutput(BaseModel):
+    package_descriptions: Dict[str, str] = Field(..., description="A dictionary mapping package names to their refined descriptions.")
+    package_order: List[str] = Field(..., description="A list of package names in the order they should be migrated (packges witb core functionality that is used by a lot of other packages).")
+
 
 
 class RefineDescriptionsTask:
@@ -106,18 +108,23 @@ class RefineDescriptionsTask:
                 "**CRITICAL:** Your output MUST be ONLY the raw JSON object string. No introductory text, no explanations, no markdown code fences (like ```json), just the JSON dictionary itself starting with `{` and ending with `}`."
             ),
             expected_output=(
-                "A **single, valid JSON object string** which is a dictionary mapping package names (string keys) to their refined description (string values). "
+                "A **single, valid JSON object string** conforming to the RefinedDescriptionsOutput Pydantic model. "
+                "It must contain the keys 'package_descriptions' (a dictionary mapping package names to refined descriptions) and 'package_order' (a list of package names in migration order). "
                 "The output MUST NOT contain any text before or after the JSON object, and MUST NOT include markdown formatting like ```json."
                 "\n\nExample of the required raw JSON output format:\n"
                 "{\n"
-                "  \"package_1\": \"Refined description for package 1, considering its interaction with package 3.\",\n"
-                "  \"package_2\": \"Refined description for package 2, focusing on its core utility role.\",\n"
-                "  \"package_3\": \"Refined description for package 3, highlighting its data processing capabilities.\"\n"
-                "  // ... entry for every package in the input ...\n"
+                "  \"package_descriptions\": {\n"
+                "    \"core_utils\": \"Refined description for core utilities, used by many other packages.\",\n"
+                "    \"feature_A\": \"Refined description for feature A, depends on core_utils.\",\n"
+                "    \"feature_B\": \"Refined description for feature B, depends on core_utils and feature_A.\"\n"
+                "    // ... entry for every package in the input ...\n"
+                "  },\n"
+                "  \"package_order\": [\"core_utils\", \"feature_A\", \"feature_B\"]\n"
+                "  // ... all package names listed in a logical migration order ...\n"
                 "}"
             ),
             agent=agent,
-            output_json=RefinedDescriptionsOutput # Use the Pydantic model for validation
+            output_pydantic=RefinedDescriptionsOutput # Use the Pydantic model for validation
         )
 
 # Example instantiation (for testing or direct use if needed)

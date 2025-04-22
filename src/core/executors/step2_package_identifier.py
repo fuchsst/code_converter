@@ -11,9 +11,7 @@ from ..context_manager import ContextManager, count_tokens, read_file_content
 from src.logger_setup import get_logger
 import src.config as global_config # Use alias for clarity
 
-# Import new partitioning and agent/task components
-from src.partitioning.louvain_partitioner import LouvainPartitioner
-from src.partitioning.balance_refiner import refine_partitions_for_balance, calculate_partition_stats
+from src.utils.clustering_utils import cluster_files_by_dependency
 from src.agents.package_describer import PackageDescriberAgent
 from src.tasks.describe_package import DescribePackageTask, PackageDescriptionOutput
 from src.agents.package_refiner import PackageRefinementAgent
@@ -47,7 +45,6 @@ class Step2Executor(StepExecutor):
         # Store cpp_source_dir as an absolute Path object
         # Ensure config is accessed via self.config hereafter
         self.cpp_source_dir = Path(self.config.get("CPP_PROJECT_DIR", "data/cpp_project")).resolve()
-        self.partitioner = LouvainPartitioner() # Instantiate the chosen partitioner
 
     # --- Graph Building (Remains mostly the same) ---
     def _build_dependency_graph(self, include_graph_data: Dict[str, List[Dict[str, Any]]]) -> nx.DiGraph:
@@ -218,8 +215,8 @@ class Step2Executor(StepExecutor):
 
         try:
             if not resuming_from_file:
-                # --- Steps 1-4: Only run if not resuming ---
-                logger.info("Performing graph building and partitioning...")
+                # --- Steps 1-3: Graph, Weights, Clustering (New Logic) ---
+                logger.info("Performing graph building, weight calculation, and dependency clustering...")
                 # 1. Build Graph
                 dependency_graph = self._build_dependency_graph(include_graph_data)
                 if not dependency_graph.nodes:
@@ -232,49 +229,39 @@ class Step2Executor(StepExecutor):
                 # 2. Calculate Node Weights (Token Counts)
                 node_weights = self._get_node_weights(list(dependency_graph.nodes()))
 
-                # 3. Initial Partitioning (Louvain)
-                initial_partitions = self.partitioner.partition(dependency_graph, node_weights, self.config)
-                if not initial_partitions:
-                    logger.warning("Initial Louvain partitioning resulted in zero communities. Skipping refinement and description.")
+                # 3. Cluster using the new dependency-based algorithm
+                max_package_tokens = self.config.get('MAX_PACKAGE_SIZE_TOKENS', global_config.MAX_PACKAGE_SIZE_TOKENS)
+                final_partitions = cluster_files_by_dependency(
+                    dependency_graph, node_weights, max_package_tokens
+                )
+
+                if not final_partitions:
+                    logger.error("Dependency-based clustering yielded no valid packages.")
                     self.context_manager.save_packages_data({}) # Save empty via ContextManager
                     self.state_manager.set_packages({"packages": {}})
                     self.state_manager.update_workflow_status('step2_complete')
                     return True
 
-                # 4. Refine Partitions for Balance
-                balanced_partitions = refine_partitions_for_balance(
-                    initial_partitions, node_weights, dependency_graph, self.config
-                )
-                if not balanced_partitions:
-                    logger.warning("Balance refinement resulted in zero valid packages. Using initial Louvain partitions (if any).")
-                    min_files = self.config.get('MIN_PACKAGE_SIZE_FILES', global_config.MIN_PACKAGE_SIZE_FILES)
-                    balanced_partitions = {i: sorted(nodes) for i, nodes in enumerate(initial_partitions.values()) if len(nodes) >= min_files}
-                    if not balanced_partitions:
-                        logger.error("Both initial partitioning and refinement yielded no valid packages.")
-                        self.context_manager.save_packages_data({}) # Save empty via ContextManager
-                        self.state_manager.set_packages({"packages": {}})
-                        self.state_manager.update_workflow_status('step2_complete') # Or failed? Let's say complete but empty.
-                        return True
-
                 # --- Prepare initial package structure for saving and processing ---
-                logger.info("Preparing initial package structure from balanced partitions.")
+                logger.info("Preparing initial package structure from final partitions.")
                 current_packages_data = {} # Reset here, as we are creating it fresh
-                for i, files in balanced_partitions.items():
-                    package_name = f"package_{i+1}" # Start naming from package_1
+                for i, files in final_partitions.items():
+                    package_name = f"package_{i+1}"
+                    package_total_tokens = sum(node_weights.get(f, 0) for f in files)
                     current_packages_data[package_name] = {
                         "description": None, # Initialize description as None
                         "file_roles": [], # Initialize roles as empty list
                         "files": files,
-                        "total_tokens": sum(node_weights.get(f, 0) for f in files)
+                        "total_tokens": package_total_tokens
                     }
                 # --- Save initial structure before starting descriptions ---
                 logger.info("Saving initial package structure via ContextManager...")
                 self.context_manager.save_packages_data(current_packages_data)
-                # Ensure the executor's view is consistent after saving
-                # current_packages_data = self.context_manager.packages_data # Already updated by save method
 
             # --- Step 5: Get LLM Descriptions (runs whether resuming or not) ---
             final_packages_output = {} # This will accumulate results as we go
+
+            # --- START: LLM Call Section ---
             analyzer_llm_config = self._get_llm_config('analyzer') # Get config dict
             analyzer_llm_instance = None # Initialize LLM instance variable
 
@@ -298,15 +285,13 @@ class Step2Executor(StepExecutor):
                     analyzer_llm_instance = None # Explicitly set to None on error
             else:
                 logger.error("Analyzer LLM configuration ('analyzer') not found. Cannot generate package descriptions.")
-                analyzer_llm_instance = None # Explicitly set to None if config is missing
+                analyzer_llm_instance = None
 
-            # --- Now, check if the LLM instance is available ---
             if not analyzer_llm_instance:
-                logger.warning("Proceeding without LLM-generated package descriptions due to configuration/instantiation issues.")
+                logger.warning("Proceeding without LLM-generated package descriptions.")
                 # Fill in placeholders for any missing descriptions
                 needs_save = False
                 for pkg_name, pkg_data in current_packages_data.items():
-                    # Check if description is missing or is a known placeholder/error
                     invalid_descs = {None, "", "Error: Failed to generate description", "N/A (LLM 'analyzer' not configured)", "N/A (LLM 'analyzer' not available)"}
                     if pkg_data.get("description") in invalid_descs:
                          pkg_data["description"] = "N/A (LLM 'analyzer' not available)"
