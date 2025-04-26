@@ -15,15 +15,26 @@ if not GEMINI_API_KEY:
     # Consider raising an error or using a default/dummy key for testing
 
 # --- Model Configuration ---
-# Allows specifying different models for different agents
+# Grouped models for different task types. Allows overriding via environment variables.
 # Format: "provider/model_name" (e.g., "gemini/gemini-1.5-pro-latest")
-DEFAULT_AGENT_MODEL = "gemini-2.5-flash-preview-04-17" # Cost-effective default
-# Environment variables (if set) should also follow the "provider/model_name" format.
-ORCHESTRATOR_MODEL = os.getenv("ORCHESTRATOR_MODEL", "gemini/gemini-2.5-pro-preview-03-25")
-ANALYZER_MODEL = os.getenv("ANALYZER_MODEL", DEFAULT_AGENT_MODEL) # Defaults to the already formatted DEFAULT_AGENT_MODEL
-MAPPER_MODEL = os.getenv("MAPPER_MODEL", "gemini/gemini-2.5-pro-exp-03-25")
-GENERATOR_EDITOR_MODEL = os.getenv("GENERATOR_EDITOR_MODEL", DEFAULT_AGENT_MODEL) # Defaults to the already formatted DEFAULT_AGENT_MODEL
-REVIEWER_MODEL = os.getenv("REVIEWER_MODEL", "gemini/gemini-2.5-pro-exp-03-25")
+
+# Manager Roles (Steps 3, 4, 5): Orchestration, delegation, review. Requires strong reasoning.
+MANAGER_MODEL = os.getenv("MANAGER_MODEL", "gemini/gemini-2.5-pro-preview-03-25") # Best reasoning
+
+# Analysis Roles (Steps 2, 3, 4, 5): Understanding code, structure, context, failures.
+ANALYZER_MODEL = os.getenv("ANALYZER_MODEL", "gemini/gemini-2.5-flash-preview-04-17") # Good capability/cost balance, large context
+
+# Design/Planning Roles (Steps 3, 4): Synthesizing analysis into structure, strategy, tasks.
+DESIGNER_PLANNER_MODEL = os.getenv("DESIGNER_PLANNER_MODEL", "gemini/gemini-2.5-flash-preview-04-17") # Good capability/cost balance
+
+# Code Generation/Refinement Roles (Step 5): Generating/fixing code based on instructions.
+GENERATOR_REFINER_MODEL = os.getenv("GENERATOR_REFINER_MODEL", "gemini/gemini-2.5-flash-preview-04-17") # Good coding capability
+
+# Utility Roles (Steps 3, 4, 5): Simple, constrained tasks like formatting, tool use.
+UTILITY_MODEL = os.getenv("UTILITY_MODEL", "gemini/gemini-2.0-flash-lite") # Most cost-effective for simple tasks
+
+# Default model if a specific role isn't assigned (should ideally not be needed with the above groupings)
+DEFAULT_AGENT_MODEL = os.getenv("DEFAULT_AGENT_MODEL", "gemini/gemini-2.5-flash-preview-04-17")
 
 # --- Path Configuration ---
 # These should ideally be passed via CLI arguments, but provide defaults or load from env

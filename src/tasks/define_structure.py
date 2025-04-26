@@ -51,156 +51,67 @@ class GodotStructureOutput(BaseModel):
     notes: Optional[str] = Field(description="Optional overall notes about the proposed structure or mapping considerations.")
 
 
-class DefineStructureTask:
+def create_hierarchical_define_structure_task(manager_agent: Agent, context: str, package_id: str) -> Task:
     """
-    CrewAI Task definition for proposing a Godot project structure based on
-    a C++ work package.
+    Creates the CrewAI Task instance for defining the Godot structure, assigned to the manager.
+
+    Args:
+        manager_agent (Agent): The Manager agent overseeing the hierarchical process.
+        context (str): The comprehensive context string assembled by ContextManager.
+        package_id (str): The ID of the work package being processed.
+
+    Returns:
+        Task: The CrewAI Task object assigned to the manager.
     """
-    def create_task(self, agent: Agent, context: str) -> Task:
-        """
-        Creates the CrewAI Task instance for defining the Godot structure.
+    logger.info(f"Creating HierarchicalDefineStructureTask for Manager (Package: {package_id})")
 
-        Args:
-            agent (Agent): The StructureDefinerAgent instance responsible for this task.
-            context (str): The context string containing work package info and C++ code snippets,
-                           assembled by the ContextManager.
+    # Example generation remains similar, describing the FINAL output format
 
-        Returns:
-            Task: The CrewAI Task object.
-        """
-        logger.info(f"Creating DefineStructureTask for agent: {agent.role}")
-
-        # Incorporate the context directly into the description for the agent
-        full_description = (
-            "You are an expert Godot Engine architect specializing in C++ to Godot conversion.\n"
-            "Analyze the provided context, which includes:\n"
-            "  - Information about the **current C++ work package** (ID, description, file list).\n"
-            "  - Potentially relevant **C++ code snippets** from the current package's files.\n"
-            "  - **Summaries of ALL work packages** (`all_package_summaries`) including their descriptions and file lists, to understand the overall project context.\n"
-            "  - Potentially an **existing Godot structure definition** (`existing_package_structure`) for THIS package from a previous run (if available).\n"
-            "  - A list of **all existing Godot scene and script files** (`all_existing_godot_files`) defined across ALL packages in previous runs, to avoid naming conflicts and understand the global structure.\n"
-            "  - Potentially general **instructions** under an 'Instructions' heading.\n\n"
-            "Your goal is to propose a logical Godot 4.x project structure for converting the **current** package. "
-            f"The target language for scripts MUST be '{config.TARGET_LANGUAGE}'.\n\n"
-            "The proposed structure MUST:\n"
-            "- Adhere strictly to SOLID principles (Single Responsibility, Open/Closed, etc.).\n"
-            "- Promote good separation of concerns (e.g., UI, logic, data).\n"
-            "- Be idiomatic to Godot 4.x best practices (scene composition, node usage).\n"
-            "- Follow Godot folder and file structure recommendations (e.g. assets, resources, scenes, scripts).\n"
-            "- Be maintainable and testable.\n"
-            "- Clearly reflect the functionality of the original C++ package.\n"
-            "- Be consistent with the overall project structure suggested by `all_package_summaries` and `all_existing_godot_files`.\n\n"
-            "Your proposal needs to define:\n"
-            "1.  `resources`: A list of resources (`.tres`) related to this work package.\n"
-            "2.  `scenes`: A list of scene definitions (`.tscn`). Each scene has alist of nodes its type, path and name. Ensure scene paths are unique across the project (check `all_existing_godot_files`).\n"
-            "3.  `scripts`: A list of script definitions (`.gd`). Each script needs a path, purpose, and potentially the scene/node it's attached to. Ensure scripts have focused responsibilities and unique paths (check `all_existing_godot_files`).\n"
-            "4.  `migration_scripts`: Godot or Python scripts to convert media files and resources to Godot formats.\n"
-            "5.  `notes`: Overall notes about the structure, mapping to the original code and considerations on Godot native feature as replacment.\n\n"
-            "Consider the following when designing the structure:\n"
-            "- **Existing Structure:** If `existing_package_structure` is provided, review it. You can refine it, correct errors, or propose a completely new structure if the existing one is unsuitable. Explain your reasoning in the `notes` if you deviate significantly.\n"
-            "- **Global Context:** Use `all_package_summaries` to understand how this package fits into the larger application. Use `all_existing_godot_files` to ensure your proposed scene/script paths are unique and consistent with potentially existing conventions.\n"
-            "- **C++ Code:** Base your node/scene/script breakdown on the functionality observed in the provided C++ snippets.\n"
-            "- **Instructions:** Adhere to any general instructions provided.\n\n"
-            "--- START OF PROVIDED CONTEXT ---\n"
-            f"{context}\n"
-            "--- END OF PROVIDED CONTEXT ---\n\n"
-            "**CRITICAL:** Your output MUST be ONLY the raw JSON object string conforming to the GodotStructureOutput model. No introductory text, no explanations, no markdown code fences (like ```json), just the JSON itself starting with `{` and ending with `}`."
-
-        )
-
-        # Generate an example based on the Pydantic model for the expected_output
-        example_output_dict = {
-            "scenes": [
-            {
-                "path": "res://scenes/example_package/main_scene.tscn",
-                "nodes": [
-                {
-                    "name": "MainScene",
-                    "type": "Node2D",
-                    "node_path": "/", # Root node path
-                    "script_path": "res://scripts/example_package/main_scene.gd"
-                },
-                {
-                    "name": "Player",
-                    "type": "CharacterBody2D",
-                    "node_path": "/MainScene/Player", # Example child path relative to root
-                    "script_path": "res://scripts/example_package/player_controller.gd"
-                },
-                {
-                    "name": "HUD",
-                    "type": "CanvasLayer",
-                    "node_path": "/MainScene/HUD", # Example child path relative to root
-                    "script_path": "res://scripts/example_package/hud.gd"
-                }
-                ]
-            }
-            ],
-            "scripts": [
-            {"path": "res://scripts/example_package/main_scene.gd", "purpose": "Coordinates overall scene logic and setup.", "attached_to_scene": "res://scenes/example_package/main_scene.tscn", "attached_to_node": "MainScene"},
-            {"path": "res://scripts/example_package/player_controller.gd", "purpose": "Handles player movement, input, and state.", "attached_to_scene": "res://scenes/example_package/main_scene.tscn", "attached_to_node": "Player"},
-            {"path": "res://scripts/example_package/hud.gd", "purpose": "Manages the Heads-Up Display elements.", "attached_to_scene": "res://scenes/example_package/main_scene.tscn", "attached_to_node": "HUD"},
-            {"path": "res://scripts/example_package/player_stats_resource.gd", "purpose": "Defines the structure for the PlayerStats resource.", "attached_to_scene": None, "attached_to_node": None}
-            ],
-            "resources": [
-             {"path": "res://resources/example_package/player_stats.tres", "purpose": "Stores player base statistics.", "script": "res://scripts/example_package/player_stats_resource.gd"}
-            ],
-            "migration_scripts": [
-            {
-                "script_type": "Python", # Or "Godot"
-                "purpose": "Converts legacy texture format to PNG.",
-                "path": "res://migration_scripts/textures/convert_legacy_tex.py",
-                # Example related resource (e.g., the .import file generated)
-                "related_resource": {"path": "res://assets/textures/converted_texture.png.import", "purpose": "Import settings for converted texture.", "script": None}
-            }
-            ],
-            "notes": "This structure separates player logic from the main scene and HUD. Includes a custom resource for player stats and a sample migration script."
-        }
-        # Convert dict to JSON string for the example
-        example_json_output = json.dumps(example_output_dict, indent=2)
+    try:
+        example_json_output = GodotStructureOutput(
+            scenes=[{
+                "path": "res://scenes/example/example.tscn",
+                "nodes": [{"name": "ExampleNode", "type": "Node2D", "node_path": "/", "script_path": "res://scripts/example/example.gd"}]
+            }],
+            scripts=[{"path": "res://scripts/example/example.gd", "purpose": "Example script.", "attached_to_scene": None, "attached_to_node": None}],
+            resources=[],
+            migration_scripts=[],
+            notes="Example structure notes."
+        ).model_dump_json(indent=2)
+    except Exception:
+        example_json_output = "{ \"scenes\": [...], \"scripts\": [...], \"resources\": [...], \"migration_scripts\": [...], \"notes\": \"...\" }"
 
 
-        return Task(
-            description=full_description,
-            expected_output=(
-                "A **single, valid JSON object string** adhering strictly to the `GodotStructureOutput` model structure. "
-                "The output MUST NOT contain any text before or after the JSON object, and MUST NOT include markdown formatting like ```json."
-                f"\n\nExample of the required raw JSON output format:\n{example_json_output}"
-            ),
-            agent=agent,
-            output_json=GodotStructureOutput # Use output_json to enforce Pydantic model
-            # output_file="analysis_results/package_structure_proposal.json" # Optional: Save output directly
-        )
+    # Define the task description for the manager agent
+    full_description = (
+        f"**Your Goal as Manager:** Orchestrate the definition of a Godot project structure for C++ work package '{package_id}'. Coordinate specialized agents using the provided context.\n\n"
 
-# Example instantiation (for testing or direct use if needed)
-# if __name__ == '__main__':
-#     from agents.structure_definer import StructureDefinerAgent # Need agent for task
-#     # Assume agent is initialized properly
-#     agent_creator = StructureDefinerAgent()
-#     structure_agent = agent_creator.get_agent()
-#
-#     # Dummy context for testing
-#     test_context = """
-#     **Work Package Definition (JSON):**
-#     ```json
-#     {
-#       "description": "Handles sound loading and playback.",
-#       "files": ["src/audio/manager.cpp", "src/audio/sound.h"]
-#     }
-#     ```
-#
-#     **File:** `src/audio/manager.h`
-#     ```cpp
-#     class AudioManager {
-#     public:
-#         static AudioManager& instance();
-#         void playSound(const std::string& soundId);
-#         void setVolume(float volume);
-#     };
-#     ```
-#     """
-#
-#     task_creator = DefineStructureTask()
-#     define_task = task_creator.create_task(structure_agent, test_context)
-#     print("DefineStructureTask created:")
-#     print(f"Description: {define_task.description}")
-#     print(f"Expected Output: {define_task.expected_output}")
+        "**Provided Context Includes:**\n"
+        "- C++ source code for the package.\n"
+        "- Summaries of all other packages.\n"
+        "- List of already defined Godot files across the project.\n"
+        "- Potentially, an existing structure definition for refinement.\n"
+        "- General instructions.\n\n"
+        "--- START OF PROVIDED CONTEXT ---\n"
+        f"{context}\n"
+        "--- END OF PROVIDED CONTEXT ---\n\n"
+
+        "**Your Orchestration Steps (Delegate to appropriate agents):**\n"
+        "1.  **Analyze C++ Code:** Delegate to 'CppCodeAnalystAgent'. Provide relevant C++ source from context. Goal: Understand C++ code purpose, structure, key elements.\n"
+        "2.  **Analyze Global Context:** Delegate to 'GlobalContextAnalystAgent'. Provide package summaries and existing Godot file list from context. Goal: Identify potential conflicts and ensure consistency.\n"
+        "3.  **Design Structure:** Delegate to 'StructureDesignerAgent'. Provide outputs from steps 1 & 2, plus any existing structure definition for refinement. Goal: Design the Godot structure (scenes, nodes, scripts, resources, migration scripts, notes) for *this* package.\n"
+        "4.  **Format Output:** Delegate to 'JsonOutputFormatterAgent'. Provide the designed structure components from step 3. Goal: Combine inputs into a single, valid JSON object string conforming precisely to the `GodotStructureOutput` Pydantic model.\n\n"
+
+        "**Final Output:** The final result of this orchestration MUST be the single, raw JSON object string produced by the 'JsonOutputFormatterAgent'."
+    )
+
+    return Task(
+        description=full_description,
+        expected_output=(
+            "A **single, valid JSON object string** adhering strictly to the `GodotStructureOutput` model structure. "
+            "The output MUST NOT contain any text before or after the JSON object, and MUST NOT include markdown formatting like ```json."
+            f"\n\nExample of the required raw JSON output format:\n{example_json_output}"
+        ),
+        agent=manager_agent, # Task assigned to the manager
+        output_pydantic=GodotStructureOutput # Ensure final output matches the model
+    )

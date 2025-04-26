@@ -12,10 +12,10 @@ from src.logger_setup import get_logger
 import src.config as global_config # Use alias for clarity
 
 from src.utils.clustering_utils import cluster_files_by_dependency
-from src.agents.package_describer import PackageDescriberAgent
-from src.tasks.describe_package import DescribePackageTask, PackageDescriptionOutput
-from src.agents.package_refiner import PackageRefinementAgent
-from src.tasks.refine_descriptions import RefineDescriptionsTask, RefinedDescriptionsOutput
+from src.agents.step2.package_describer import get_package_describer_agent
+from src.tasks.step2.describe_package import DescribePackageTask, PackageDescriptionOutput
+from src.agents.step2.package_refiner import get_package_refinement_agent
+from src.tasks.step2.refine_descriptions import RefineDescriptionsTask, RefinedDescriptionsOutput
 from crewai import LLM as CrewAI_LLM # Alias default LLM
 from src.llms.google_genai_llm import GoogleGenAI_LLM
 from src.utils.json_utils import parse_json_from_string
@@ -307,8 +307,7 @@ class Step2Executor(StepExecutor):
             else: # LLM instance IS available
                  logger.info("LLM instance available. Proceeding with description generation...")
                  # Setup agent and task creator
-                 describer_agent_creator = PackageDescriberAgent()
-                 describer_agent = describer_agent_creator.get_agent(llm_instance=analyzer_llm_instance)
+                 describer_agent = get_package_describer_agent(llm_instance=analyzer_llm_instance)
                  task_creator = DescribePackageTask()
                  max_retries = self.config.get("LLM_CALL_RETRIES", LLM_CALL_RETRIES)
 
@@ -488,8 +487,7 @@ class Step2Executor(StepExecutor):
                               logger.error("Skipping refinement step because the refiner LLM instance could not be created.")
                          else:
                               # --- Refinement Crew Setup ---
-                              refiner_agent_creator = PackageRefinementAgent()
-                              refiner_agent = refiner_agent_creator.get_agent(llm_instance=refiner_llm_instance) # Use dedicated instance
+                              refiner_agent = get_package_refinement_agent(llm_instance=refiner_llm_instance) # Use dedicated instance
                               refinement_task_creator = RefineDescriptionsTask()
 
                               # Prepare context - use the state accumulated so far

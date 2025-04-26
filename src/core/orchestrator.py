@@ -56,14 +56,16 @@ class Orchestrator:
         # State Manager
         self.state_manager = StateManager(analysis_dir=self.analysis_dir)
 
-        # Context Manager (needs graph path, source dir, and analysis dir)
+        # Context Manager (needs graph path, source dir, analysis dir, and state manager)
         self.context_manager = ContextManager(
             include_graph_path=self.include_graph_path,
             cpp_source_dir=self.cpp_project_dir,
-            analysis_output_dir=self.analysis_dir
+            analysis_output_dir=self.analysis_dir,
+            state_manager=self.state_manager # Pass state manager instance
         )
-        # Ensure ContextManager loads the graph if Step 1 might have just run
-        self.context_manager.include_graph = self.state_manager.get_state().get("include_graph_data", {}) # Or reload from file?
+        # Ensure ContextManager loads the include graph if Step 1 might have just run
+        # self.context_manager.include_graph = self.state_manager.get_state().get("include_graph_data", {}) # This seems redundant if ContextManager loads it
+        # Let's rely on ContextManager's __init__ to load the graph.
 
         # LLM Configurations (for direct litellm use)
         self.llm_configs = self._initialize_llm_configs()
@@ -105,15 +107,44 @@ class Orchestrator:
         return cfg
 
     def _initialize_llm_configs(self) -> Dict[str, Dict[str, Any]]:
-        """Initializes LLM configuration dictionaries for LiteLLM based on config."""
+        """Initializes LLM configuration dictionaries based on grouped config variables."""
         llm_configs_map = {}
+        # Fetch the grouped model names from the config
+        manager_model = self.config_dict.get("MANAGER_MODEL")
+        analyzer_model = self.config_dict.get("ANALYZER_MODEL")
+        designer_planner_model = self.config_dict.get("DESIGNER_PLANNER_MODEL")
+        generator_refiner_model = self.config_dict.get("GENERATOR_REFINER_MODEL")
+        utility_model = self.config_dict.get("UTILITY_MODEL")
+        default_model = self.config_dict.get("DEFAULT_AGENT_MODEL") # Fallback if a group is missing
+
+        # Map specific agent roles to the model
         role_to_model_map = {
-            'analyzer': self.config_dict.get("ANALYZER_MODEL"),
-            'mapper': self.config_dict.get("MAPPER_MODEL"),
-            'generator': self.config_dict.get("GENERATOR_EDITOR_MODEL"),
-            # Add 'reviewer' if needed
+            # Step 1 & 2 (Analysis)
+            'analyzer': analyzer_model or default_model,
+            # Step 3 Crew
+            'cpp_analyst': analyzer_model or default_model, # Use ANALYZER_MODEL
+            'global_context_analyst': analyzer_model or default_model, # Use ANALYZER_MODEL
+            'structure_designer': designer_planner_model or default_model, # Use DESIGNER_PLANNER_MODEL
+            'formatter': utility_model or default_model, # Use UTILITY_MODEL for Step 3 formatter
+            'manager_step3': manager_model or default_model, # Use MANAGER_MODEL
+            # Step 4 Crew
+            # 'cpp_analyst_step4': analyzer_model or default_model, # Already covered by 'cpp_analyst' if consistent
+            'godot_analyst': analyzer_model or default_model, # Use ANALYZER_MODEL
+            'strategist': designer_planner_model or default_model, # Use DESIGNER_PLANNER_MODEL
+            'decomposer': designer_planner_model or default_model, # Use DESIGNER_PLANNER_MODEL
+            # 'formatter_step4': utility_model or default_model, # Covered by 'formatter' if consistent
+            'manager_step4': manager_model or default_model, # Use MANAGER_MODEL
+            # Step 5 Crew
+            'generator': generator_refiner_model or default_model, # Use GENERATOR_REFINER_MODEL
+            'validator': utility_model or default_model, # Use UTILITY_MODEL
+            'refiner': generator_refiner_model or default_model, # Use GENERATOR_REFINER_MODEL
+            'file_manager': utility_model or default_model, # Use UTILITY_MODEL
+            'remapping_advisor': analyzer_model or default_model, # Use ANALYZER_MODEL
+            'manager_step5': manager_model or default_model, # Use MANAGER_MODEL
+            'manager': manager_model or default_model
         }
-        # Common LLM settings from config
+
+        # Common LLM settings from config (remains the same)
         common_params = {
             "temperature": self.config_dict.get("DEFAULT_TEMPERATURE", 0.7),
             "top_p": self.config_dict.get("DEFAULT_TOP_P", 0.95),
@@ -137,13 +168,16 @@ class Orchestrator:
                         config_for_role["api_key"] = api_key
                         logger.debug(f"Adding GEMINI_API_KEY to config for role '{role}'")
                     else:
-                        logger.warning(f"GEMINI_API_KEY not found in config or env for role '{role}' ({model_name}). LiteLLM might fail.")
-                # Add elif blocks for other providers if explicit key passing is desired
+                        # Log only once per provider if key is missing?
+                        # For now, logs per role.
+                        logger.warning(f"GEMINI_API_KEY not found in config or env for role '{role}' using model '{model_name}'. LiteLLM might fail.")
+                # Add elif blocks for other providers (e.g., OpenAI, Anthropic) if explicit key passing is desired
 
                 llm_configs_map[role] = config_for_role
                 logger.info(f"Prepared LLM config for role '{role}': model={model_name}")
             else:
-                logger.warning(f"No model configured for LLM role '{role}'.")
+                # Log if a role in the map doesn't have a valid model assigned
+                logger.warning(f"No valid model name found or configured for LLM role '{role}'. Skipping config preparation.")
 
         if not llm_configs_map:
              logger.error("No LLM configurations were successfully prepared!")

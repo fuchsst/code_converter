@@ -4,6 +4,7 @@ import json
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union # Added Union
+from typing import TYPE_CHECKING # Import for type hinting StateManager
 from src.logger_setup import get_logger
 import src.config as config
 import tiktoken
@@ -18,17 +19,6 @@ logger = get_logger(__name__)
 
 PACKAGES_JSON_FILENAME = "packages.json" # Define filename constant
 
-# --- Clang Imports ---
-try:
-    import clang.cindex
-    # Ensure libclang path is configured if necessary
-    # clang.cindex.Config.set_library_path(...)
-except ImportError:
-    print("Clang Python bindings not found. Please install 'clang'. Context extraction will be limited.")
-    clang = None # Set clang to None to handle its absence gracefully
-except Exception as e:
-    print(f"Error initializing libclang: {e}. Context extraction might fail.")
-    clang = None
 
 # --- Tiktoken Initializer ---
 # Attempt to get a default tokenizer. cl100k_base is common for GPT-4/3.5/Embedding models
@@ -42,24 +32,6 @@ except Exception as e:
     tokenizer = None
 
 
-# --- Clang Helper ---
-# Define kinds of cursors we want to extract for interfaces
-INTERFACE_CURSOR_KINDS = [
-    clang.cindex.CursorKind.NAMESPACE,
-    clang.cindex.CursorKind.CLASS_DECL,
-    clang.cindex.CursorKind.STRUCT_DECL,
-    clang.cindex.CursorKind.ENUM_DECL,
-    clang.cindex.CursorKind.FUNCTION_DECL,
-    clang.cindex.CursorKind.CXX_METHOD,
-    clang.cindex.CursorKind.VAR_DECL, # For global/static variables
-    clang.cindex.CursorKind.TYPEDEF_DECL,
-    clang.cindex.CursorKind.TYPE_ALIAS_DECL,
-    clang.cindex.CursorKind.CONSTRUCTOR,
-    clang.cindex.CursorKind.DESTRUCTOR,
-    clang.cindex.CursorKind.FIELD_DECL, # Inside classes/structs
-    clang.cindex.CursorKind.ENUM_CONSTANT_DECL, # Inside enums
-    # Add others if needed, e.g., USING_DECLARATION?
-]
 
 # --- File Reading Utility ---
 
@@ -93,8 +65,8 @@ def read_file_content(file_path: str, remove_comments_blank_lines: bool = True) 
             content = "\n".join(processed_lines) # Join the processed, non-blank, condensed lines
 
             final_len = len(content)
-            if original_len != final_len: # Log only if changes were made
-                logger.debug(f"Removed comments/blank lines & condensed whitespace in {os.path.basename(file_path)} (Length: {original_len} -> {final_len})")
+            #if original_len != final_len: # Log only if changes were made
+            #    logger.debug(f"Removed comments/blank lines & condensed whitespace in {os.path.basename(file_path)} (Length: {original_len} -> {final_len})")
 
         return content
     except FileNotFoundError:
@@ -186,8 +158,12 @@ def read_godot_file_content(file_path: str) -> str | None:
 
 # --- ContextManager Class ---
 
+# Forward reference for type hint if StateManager is imported later or causes circular dependency
+if TYPE_CHECKING:
+    from .state_manager import StateManager
+
 class ContextManager:
-    def __init__(self, include_graph_path: str, cpp_source_dir: str, analysis_output_dir: str):
+    def __init__(self, include_graph_path: str, cpp_source_dir: str, analysis_output_dir: str, state_manager: 'StateManager'):
         """
         Initializes the ContextManager.
 
@@ -195,45 +171,26 @@ class ContextManager:
             include_graph_path (str): Path to the JSON file containing the include graph.
             cpp_source_dir (str): Path to the root of the C++ source code.
             analysis_output_dir (str): Path to the directory for analysis output files (like packages.json).
+            state_manager (StateManager): Instance of the StateManager to access package states.
         """
         self.include_graph_path = include_graph_path
         self.cpp_source_dir = Path(cpp_source_dir).resolve() # Store as absolute Path
         self.analysis_dir = Path(analysis_output_dir).resolve() # Store as absolute Path
         self.packages_file_path = self.analysis_dir / PACKAGES_JSON_FILENAME
+        self.state_manager = state_manager # Store StateManager instance
 
         self.include_graph = self._load_include_graph()
-        self.packages_data, self.package_processing_order = self._load_packages_data()
+        # Packages data is now primarily managed by StateManager, but keep loading for initial state?
+        # Let's rely on StateManager for package data access.
+        # self.packages_data, self.package_processing_order = self._load_packages_data()
         self.clang_index = None
         self.compile_db = None
-
-        if clang:
-            try:
-                self.clang_index = clang.cindex.Index.create()
-                logger.info("Clang index created successfully.")
-                # Try to load compile_commands.json using Path
-                compile_commands_path = self.cpp_source_dir / 'compile_commands.json'
-                if compile_commands_path.exists():
-                    try:
-                        # Pass the directory path as a string
-                        self.compile_db = clang.cindex.CompilationDatabase.fromDirectory(str(self.cpp_source_dir))
-                        logger.info(f"Loaded compilation database from: {self.cpp_source_dir}")
-                    except clang.cindex.LibclangError as db_err:
-                        logger.error(f"Failed to load compilation database from {self.cpp_source_dir}: {db_err}")
-                else:
-                    logger.warning(f"compile_commands.json not found in {self.cpp_source_dir}. Interface extraction may be inaccurate.")
-            except Exception as clang_init_err:
-                logger.error(f"Failed to initialize Clang index or database: {clang_init_err}", exc_info=True)
-                self.clang_index = None # Ensure it's None on error
-                self.compile_db = None
-        else:
-            logger.warning("Clang library not available. C++ interface extraction disabled.")
-
 
         if not self.include_graph:
              logger.warning(f"Include graph at '{include_graph_path}' failed to load or is empty.")
         else:
              # Updated log message
-             logger.info(f"Context Manager initialized. Loaded include graph ({len(self.include_graph)} entries). Loaded packages data ({len(self.packages_data)} packages).")
+            logger.info(f"Context Manager initialized. Loaded include graph ({len(self.include_graph)} entries). StateManager provided.")
 
     def _load_include_graph(self):
         """Loads the include graph JSON file."""
@@ -428,6 +385,33 @@ class ContextManager:
 
         logger.info(f"Compiled existing Godot files from {len(all_godot_files)} packages based on structure definitions.")
         return all_godot_files
+
+    def get_globally_defined_godot_files_from_state(self) -> List[str]:
+        """
+        Retrieves a unique list of all Godot file paths defined in the 'defined_godot_files'
+        artifact for packages that have successfully completed Step 3 or later.
+        """
+        if not self.state_manager:
+            logger.error("StateManager not available in ContextManager. Cannot retrieve defined files from state.")
+            return []
+
+        all_defined_files = set()
+        packages = self.state_manager.get_all_packages()
+        # Define statuses indicating structure has been defined or processed further
+        valid_statuses = ['structure_defined', 'mapping_defined', 'needs_remapping',
+                          'running_mapping', 'running_remapping', 'failed_mapping', 'failed_remapping',
+                          'running_processing', 'processing_report_generated', 'failed_processing',
+                          'processed']
+
+        for pkg_id, pkg_data in packages.items():
+            if pkg_data.get('status') in valid_statuses:
+                defined_list = pkg_data.get('artifacts', {}).get('defined_godot_files')
+                if isinstance(defined_list, list):
+                    all_defined_files.update(defined_list)
+                # else: logger.debug(f"Package {pkg_id} has status {pkg_data.get('status')} but no 'defined_godot_files' artifact.")
+
+        logger.info(f"Retrieved {len(all_defined_files)} unique defined Godot file paths from state artifacts.")
+        return sorted(list(all_defined_files))
 
     def get_existing_godot_output_files(self, godot_project_dir: str) -> List[str]:
         """

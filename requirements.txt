@@ -1,6 +1,8 @@
 # Core dependencies
 crewai>=0.114.0
-google-generativeai>=0.8.4
+openai>=1.0.0 # Explicitly add openai
+httpx>=0.23.0   # Explicitly add httpx
+google-genai
 python-dotenv>=1.1.0
 clang>=20.1.0
 tiktoken>=0.7.0 # For token counting

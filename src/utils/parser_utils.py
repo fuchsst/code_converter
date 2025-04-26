@@ -3,7 +3,7 @@ import json
 import re # Added re
 from typing import Tuple, Optional, List, Dict, Any, Union # Added typing imports
 from src.logger_setup import get_logger
-from src.tasks.define_mapping import MappingOutput # Import the Pydantic model
+from src.tasks.step4.define_mapping import MappingOutput # Import the Pydantic model
 
 logger = get_logger(__name__)
 
