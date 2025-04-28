@@ -25,10 +25,12 @@ class ColoredFormatter(logging.Formatter):
         record.color_end = self.RESET_CODE if record.color_start else ''
         return super().format(record)
 
-def setup_logging(log_level=logging.DEBUG):
+def setup_logging(log_level=logging.INFO):
     """Configures logging with colored console output"""
     if not os.path.exists(LOG_DIR):
         os.makedirs(LOG_DIR)
+
+    logging.basicConfig(encoding='utf-8')
 
     # Formatter for file handler (no colors)
     file_formatter = logging.Formatter(
@@ -51,7 +53,7 @@ def setup_logging(log_level=logging.DEBUG):
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(console_formatter)
     console_handler.setLevel(log_level)
-
+    
     # Configure root logger
     root_logger = logging.getLogger()
     root_logger.setLevel(log_level)

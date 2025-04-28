@@ -109,53 +109,29 @@ class Orchestrator:
     def _initialize_llm_configs(self) -> Dict[str, Dict[str, Any]]:
         """Initializes LLM configuration dictionaries based on grouped config variables."""
         llm_configs_map = {}
-        # Fetch the grouped model names from the config
-        manager_model = self.config_dict.get("MANAGER_MODEL")
-        analyzer_model = self.config_dict.get("ANALYZER_MODEL")
-        designer_planner_model = self.config_dict.get("DESIGNER_PLANNER_MODEL")
-        generator_refiner_model = self.config_dict.get("GENERATOR_REFINER_MODEL")
-        utility_model = self.config_dict.get("UTILITY_MODEL")
-        default_model = self.config_dict.get("DEFAULT_AGENT_MODEL") # Fallback if a group is missing
-
-        # Map specific agent roles to the model
-        role_to_model_map = {
-            # Step 1 & 2 (Analysis)
-            'analyzer': analyzer_model or default_model,
-            # Step 3 Crew
-            'cpp_analyst': analyzer_model or default_model, # Use ANALYZER_MODEL
-            'global_context_analyst': analyzer_model or default_model, # Use ANALYZER_MODEL
-            'structure_designer': designer_planner_model or default_model, # Use DESIGNER_PLANNER_MODEL
-            'formatter': utility_model or default_model, # Use UTILITY_MODEL for Step 3 formatter
-            'manager_step3': manager_model or default_model, # Use MANAGER_MODEL
-            # Step 4 Crew
-            # 'cpp_analyst_step4': analyzer_model or default_model, # Already covered by 'cpp_analyst' if consistent
-            'godot_analyst': analyzer_model or default_model, # Use ANALYZER_MODEL
-            'strategist': designer_planner_model or default_model, # Use DESIGNER_PLANNER_MODEL
-            'decomposer': designer_planner_model or default_model, # Use DESIGNER_PLANNER_MODEL
-            # 'formatter_step4': utility_model or default_model, # Covered by 'formatter' if consistent
-            'manager_step4': manager_model or default_model, # Use MANAGER_MODEL
-            # Step 5 Crew
-            'generator': generator_refiner_model or default_model, # Use GENERATOR_REFINER_MODEL
-            'validator': utility_model or default_model, # Use UTILITY_MODEL
-            'refiner': generator_refiner_model or default_model, # Use GENERATOR_REFINER_MODEL
-            'file_manager': utility_model or default_model, # Use UTILITY_MODEL
-            'remapping_advisor': analyzer_model or default_model, # Use ANALYZER_MODEL
-            'manager_step5': manager_model or default_model, # Use MANAGER_MODEL
-            'manager': manager_model or default_model
-        }
+        # Define the config keys for the models we need to configure
+        model_config_keys = [
+            "MANAGER_MODEL",
+            "ANALYZER_MODEL",
+            "DESIGNER_PLANNER_MODEL",
+            "GENERATOR_REFINER_MODEL",
+            "UTILITY_MODEL",
+            "DEFAULT_AGENT_MODEL" # Include default as a potential fallback
+        ]
 
         # Common LLM settings from config (remains the same)
         common_params = {
-            "temperature": self.config_dict.get("DEFAULT_TEMPERATURE", 0.7),
+            "temperature": self.config_dict.get("DEFAULT_TEMPERATURE", 0.9),
             "top_p": self.config_dict.get("DEFAULT_TOP_P", 0.95),
-            "top_k": self.config_dict.get("DEFAULT_TOP_K", 40),
+            #"top_k": self.config_dict.get("DEFAULT_TOP_K", 40),
             # Add other common params if needed by litellm.completion
         }
 
-        for role, model_name in role_to_model_map.items():
+        for config_key in model_config_keys:
+            model_name = self.config_dict.get(config_key)
             if model_name:
-                # Prepare the config dictionary for this role
-                config_for_role = {
+                # Prepare the config dictionary using the config key itself
+                config_for_key = {
                     "model": model_name,
                     **common_params # Add common params
                 }
@@ -165,19 +141,17 @@ class Orchestrator:
                 if model_name.startswith(("gemini/", "google/")):
                     api_key = self.config_dict.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
                     if api_key:
-                        config_for_role["api_key"] = api_key
-                        logger.debug(f"Adding GEMINI_API_KEY to config for role '{role}'")
+                        config_for_key["api_key"] = api_key
+                        logger.debug(f"Adding GEMINI_API_KEY to config for key '{config_key}'")
                     else:
-                        # Log only once per provider if key is missing?
-                        # For now, logs per role.
-                        logger.warning(f"GEMINI_API_KEY not found in config or env for role '{role}' using model '{model_name}'. LiteLLM might fail.")
+                        logger.warning(f"GEMINI_API_KEY not found in config or env for key '{config_key}' using model '{model_name}'. LiteLLM might fail.")
                 # Add elif blocks for other providers (e.g., OpenAI, Anthropic) if explicit key passing is desired
 
-                llm_configs_map[role] = config_for_role
-                logger.info(f"Prepared LLM config for role '{role}': model={model_name}")
+                llm_configs_map[config_key] = config_for_key
+                logger.info(f"Prepared LLM config for key '{config_key}': model={model_name}")
             else:
-                # Log if a role in the map doesn't have a valid model assigned
-                logger.warning(f"No valid model name found or configured for LLM role '{role}'. Skipping config preparation.")
+                # Log if a config key doesn't have a model assigned
+                logger.warning(f"No model name found or configured for config key '{config_key}'. Skipping config preparation.")
 
         if not llm_configs_map:
              logger.error("No LLM configurations were successfully prepared!")

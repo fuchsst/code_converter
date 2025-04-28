@@ -1,9 +1,10 @@
 # src/utils/parser_utils.py
 import json
-import re # Added re
-from typing import Tuple, Optional, List, Dict, Any, Union # Added typing imports
+import re
+from typing import Tuple, Optional, Dict, Any
 from src.logger_setup import get_logger
-from src.tasks.step4.define_mapping import MappingOutput # Import the Pydantic model
+from src.tasks.step4.define_mapping import MappingOutput
+from src.utils.json_utils import parse_json_from_string
 
 logger = get_logger(__name__)
 
@@ -34,7 +35,7 @@ def parse_step4_output(combined_output: str) -> Tuple[Optional[str], Optional[Di
         # Attempt to parse the whole thing as JSON in case the agent missed the separator but provided JSON
         json_data = parse_json_from_string(combined_output)
         if json_data and isinstance(json_data, dict):
-             logger.warning("Separator missing, but parsed the full output as JSON. Returning JSON only.")
+             logger.warning("Separator missing, but parsed the full output as JSON dictionary. Returning JSON only.")
              return None, json_data
         return None, None # Truly failed
 
@@ -55,13 +56,18 @@ def parse_step4_output(combined_output: str) -> Tuple[Optional[str], Optional[Di
             logger.error("Parsing failed: JSON part is empty after cleaning.")
             return markdown_strategy or None, None # Return markdown if it exists
 
-        # Parse the cleaned JSON string into a Python dictionary
-        mapping_data_json = json.loads(json_part_cleaned)
+        # Use the consolidated parser from json_utils
+        mapping_data_json = parse_json_from_string(json_part_cleaned)
 
-        # Basic validation: Check if it's a dictionary
+        if mapping_data_json is None:
+            logger.error("Parsing failed: Consolidated parser could not extract valid JSON from the JSON part.")
+            logger.debug(f"Cleaned JSON part provided to parser:\n{json_part_cleaned}")
+            return markdown_strategy or None, None
+
+        # Basic validation: Check if it's a dictionary (expected for MappingOutput)
         if not isinstance(mapping_data_json, dict):
-            logger.error(f"Parsing failed: Parsed JSON is not a dictionary (type: {type(mapping_data_json)}).")
-            logger.debug(f"Cleaned JSON part:\n{json_part_cleaned}")
+            logger.error(f"Parsing failed: Parsed JSON is not a dictionary (type: {type(mapping_data_json)}). Expected for MappingOutput.")
+            logger.debug(f"Parsed JSON data:\n{json.dumps(mapping_data_json, indent=2)}")
             return markdown_strategy or None, None
 
         # **Crucial Validation against Pydantic Model**
@@ -75,83 +81,8 @@ def parse_step4_output(combined_output: str) -> Tuple[Optional[str], Optional[Di
             # Return markdown part, but indicate JSON failure by returning None for the data
             return markdown_strategy or None, None
 
-    except json.JSONDecodeError as e:
-        logger.error(f"Parsing failed: Invalid JSON in the output. Error: {e}")
-        logger.debug(f"Cleaned JSON part attempted to parse:\n{json_part_cleaned}")
-        return markdown_strategy or None, None
     except Exception as e:
         logger.error(f"An unexpected error occurred during Step 4 output parsing: {e}", exc_info=True)
-        return markdown_strategy or None, None
-
-
-def parse_json_from_string(text: str) -> Optional[Union[Dict, List]]:
-    """
-    Attempts to extract and parse a JSON object or list from a string,
-    potentially cleaning markdown fences.
-    """
-    if not text:
-        return None
-
-    # Basic cleaning: remove markdown fences and strip whitespace
-    cleaned_text = re.sub(r'^```json\s*', '', text.strip(), flags=re.IGNORECASE)
-    cleaned_text = re.sub(r'\s*```$', '', cleaned_text)
-    cleaned_text = cleaned_text.strip()
-
-    if not cleaned_text:
-        return None
-
-    try:
-        # Find the first '{' or '[' to potentially trim leading garbage
-        start_brace = cleaned_text.find('{')
-        start_bracket = cleaned_text.find('[')
-
-        start_index = -1
-        if start_brace == -1 and start_bracket == -1:
-            logger.debug("No JSON start character ({ or [) found in cleaned text.")
-            return None # No JSON object/list start found
-
-        if start_brace != -1 and start_bracket != -1:
-            start_index = min(start_brace, start_bracket)
-        elif start_brace != -1:
-            start_index = start_brace
-        else: # start_bracket != -1
-            start_index = start_bracket
-
-        json_candidate = cleaned_text[start_index:]
-
-        # Find the corresponding closing '}' or ']' - This is tricky and imperfect.
-        # A simple last '}' or ']' might work for basic cases but fails with nesting.
-        # For robustness, we rely on json.loads() to handle the structure.
-        # We can try finding the last one as a heuristic for trimming trailing garbage.
-        end_brace = json_candidate.rfind('}')
-        end_bracket = json_candidate.rfind(']')
-        end_index = max(end_brace, end_bracket)
-
-        if end_index != -1:
-             # Trim potential trailing garbage after the last brace/bracket
-             # Add 1 because slicing is exclusive of the end index
-             json_candidate_trimmed = json_candidate[:end_index + 1]
-        else:
-             # If no closing char found, maybe it's truncated? Try parsing anyway.
-             json_candidate_trimmed = json_candidate
-
-
-        # Attempt to parse the candidate string
-        parsed_json = json.loads(json_candidate_trimmed)
-        logger.debug("Successfully parsed JSON object/list from string.")
-        return parsed_json
-
-    except json.JSONDecodeError as e:
-        logger.warning(f"JSON decode failed for candidate string: {e}")
-        logger.debug(f"Candidate JSON string tried:\n{json_candidate_trimmed}")
-        # Try parsing the original cleaned text as a fallback
-        try:
-             parsed_json_orig = json.loads(cleaned_text)
-             logger.debug("Successfully parsed JSON from original cleaned text as fallback.")
-             return parsed_json_orig
-        except json.JSONDecodeError:
-             logger.error("JSON decode failed for both candidate and original cleaned text.")
-             return None
-    except Exception as e:
-        logger.error(f"Unexpected error during JSON parsing from string: {e}", exc_info=True)
-        return None
+        # Attempt to return markdown part if available even on unexpected errors
+        markdown_part = locals().get('markdown_strategy', None)
+        return markdown_part, None

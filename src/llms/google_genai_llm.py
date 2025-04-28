@@ -7,9 +7,10 @@ import json
 from google import genai
 from typing import Tuple
 from google.genai.errors import APIError # Import Google API error class
+from google.genai.client import DebugConfig
 from google.genai.types import (
     GenerationConfig, GenerateContentConfig, ContentDict, PartDict, # Added GenerateContentConfig
-    Tool, ThinkingConfig, FunctionDeclaration, GoogleSearch
+    Tool, ThinkingConfig, FunctionDeclaration, AutomaticFunctionCallingConfig, ToolConfig, FunctionCallingConfig
 )
 
 from pydantic import BaseModel, RootModel # Import Pydantic base classes
@@ -25,9 +26,10 @@ class GoogleGenAI_LLM(BaseLLM):
     """
     Custom CrewAI LLM wrapper for Google Generative AI (Gemini) models.
     Uses the official google-generativeai SDK directly via the Client interface.
+    Supports authentication via API key (passed or env var) or Application Default Credentials (ADC).
     """
     model_name: str # Store the target model name (e.g., gemini-1.5-pro-latest)
-    api_key: Optional[str] = None
+    api_key: Optional[str] = None # Explicitly passed API key
     generation_config_dict: Optional[Dict[str, Any]] = None
     safety_settings_dict: Optional[List[Dict[str, Any]]] = None
     request_timeout: Optional[int] = None # Timeout in seconds
@@ -59,8 +61,13 @@ class GoogleGenAI_LLM(BaseLLM):
         # For google-genai, the generate_content method takes the model name directly.
         super().__init__(model=self.model_name, temperature=temperature)
 
-        # Store API key if provided, otherwise rely on environment variable
-        self.api_key = api_key # Will be used by _get_client
+        # Store explicitly passed API key
+        self.api_key = api_key
+        if api_key:
+             logger.info("API key provided during initialization.")
+        else:
+             logger.info("No API key provided during initialization. Will check environment or use ADC.")
+
 
         # Store schema if provided
         self.response_schema = response_schema
@@ -93,28 +100,34 @@ class GoogleGenAI_LLM(BaseLLM):
             logger.warning(f"Invalid GEMINI_TIMEOUT value '{env_timeout}'. Using default: {default_timeout}s")
             self.request_timeout = default_timeout
 
-        logger.info(f"Initialized GoogleGenAI_LLM wrapper for model: {self.model_name} (raw: {raw_model_name})")
+        logger.info(f"Initialized LiteLLMGeminiLLM wrapper for model: {self.model_name} (raw: {raw_model_name})")
         # Log base config, thinking/grounding flags will be logged in call()
         logger.debug(f"Base Generation Config: {self.generation_config_dict}")
         logger.debug(f"Safety Settings: {self.safety_settings_dict}")
         logger.debug(f"Request Timeout: {self.request_timeout}s")
 
     def _get_client(self) -> genai.Client:
-        """Initializes and returns the google-generativeai client instance."""
+        """
+        Initializes and returns the google-generativeai client instance.
+        Prioritizes explicitly passed API key, then environment variable, then ADC.
+        """
         if self._client_instance is None:
             try:
-                # Determine API key source
-                current_api_key = self.api_key or os.getenv("GEMINI_API_KEY")
-                if not current_api_key:
-                    raise ValueError("GEMINI_API_KEY must be set in environment or passed to constructor.")
-
-                # Instantiate the client, passing the API key directly
-                # TODO: Add support for Vertex AI client options if needed later
-                self._client_instance = genai.Client(api_key=current_api_key)
+                # 1. Check for explicitly passed API key
                 if self.api_key:
-                    logger.debug("Instantiated google.generativeai Client with provided API key.")
+                    logger.debug("Using explicitly provided API key for google.generativeai Client.")
+                    self._client_instance = genai.Client(api_key=self.api_key)
+                # 2. Check for environment variable API key
+                elif os.getenv("GEMINI_API_KEY"):
+                    logger.debug("Using API key from GEMINI_API_KEY environment variable for google.generativeai Client.")
+                    self._client_instance = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+                # 3. Fallback to Application Default Credentials (ADC)
                 else:
-                    logger.debug("Instantiated google.generativeai Client with API key from environment variable.")
+                    logger.debug("No API key found (explicit or env var). Attempting to instantiate google.generativeai Client using Application Default Credentials (ADC)...")
+                    # Instantiate the client without API key - it will use ADC.
+                    # TODO: Add support for Vertex AI client options (project, location) if needed later
+                    self._client_instance = genai.Client()
+                    logger.debug("Successfully instantiated google.generativeai Client using ADC.")
 
             except Exception as e:
                 logger.error(f"Failed to initialize Google Generative AI Client: {e}", exc_info=True)
@@ -185,6 +198,9 @@ class GoogleGenAI_LLM(BaseLLM):
         if genai_tools_for_call:
              combined_config_params["tools"] = genai_tools_for_call # Add tools here
              logger.debug("Adding tools to GenerateContentConfig parameters")
+
+        combined_config_params["automatic_function_calling"]=AutomaticFunctionCallingConfig(disable=True)
+        combined_config_params["tool_config"]=ToolConfig(function_calling_config=FunctionCallingConfig(mode='ANY'))
 
         # Instantiate GenerateContentConfig if there are any params
         final_config_obj = GenerateContentConfig(**combined_config_params) if combined_config_params else None

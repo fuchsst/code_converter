@@ -4,7 +4,7 @@ import json
 from typing import Any, Dict, List, Optional, Type
 from ..step_executor import StepExecutor
 from ..state_manager import StateManager
-from ..context_manager import ContextManager
+from ..context_manager import ContextManager, count_tokens, read_godot_file_content
 from ..remapping_logic import RemappingLogic
 # Standard library imports
 import os
@@ -38,8 +38,8 @@ from src.tools.crewai_tools import (
 
 # Import NEW Task definitions
 from src.tasks.step5.process_code import (
-    HierarchicalProcessTaskItem,
-    AnalyzePackageFailuresTask,
+    create_hierarchical_process_taskitem_task,
+    create_analyze_package_failures_task,
     RemappingAdvice, # Import Pydantic model for parsing result
     TaskItemProcessingResult # Import Pydantic model for parsing result
 )
@@ -47,6 +47,7 @@ from src.tasks.step5.process_code import (
 # Import utilities
 from src.utils.json_utils import parse_json_from_string # Helper for parsing final JSON output
 from src.logger_setup import get_logger
+import src.config as global_config # Use alias
 # Import TaskOutput for type hinting the callback parameter
 from crewai.tasks.task_output import TaskOutput
 
@@ -66,131 +67,8 @@ class Step5Executor(StepExecutor):
         self.remapping_logic = remapping_logic
         self.target_dir = os.path.abspath(config.get("GODOT_PROJECT_DIR", "data/godot_project"))
         self.analysis_dir = os.path.abspath(config.get("ANALYSIS_OUTPUT_DIR", "analysis_output"))
-        # task_item_max_retries is now handled internally by CrewAI agent/task config if needed
+        logger.info("Step5Executor initialized.")
 
-        # --- Instantiate CrewAI Tools ---
-        # These tools wrap the actual implementation logic
-        self.file_writer_tool = FileWriterTool()
-        self.file_replacer_tool = FileReplacerTool()
-        self.syntax_validator_tool = GodotSyntaxValidatorTool()
-        self.remapping_tool = RemappingLogicTool()
-        logger.info("Instantiated CrewAI tools for Step 5.")
-
-
-        # --- Instantiate Task Creators ---
-        self.item_task_creator = HierarchicalProcessTaskItem()
-        self.analysis_task_creator = AnalyzePackageFailuresTask()
-        logger.info("Instantiated Task creators for Step 5.")
-
-        # --- Get LLM Instances (Consider moving agent creation here if LLMs are ready) ---
-        # Get LLM instances using specific roles defined in Orchestrator's map
-        # The _get_llm_instance_by_role method handles fetching the correct config based on the role name.
-        self.generator_llm_instance = self._get_llm_instance_by_role('generator')
-        self.validator_llm_instance = self._get_llm_instance_by_role('validator')
-        self.refiner_llm_instance = self._get_llm_instance_by_role('refiner', fallback_llm=self.generator_llm_instance)
-        self.file_manager_llm_instance = self._get_llm_instance_by_role('file_manager')
-        self.remapping_llm_instance = self._get_llm_instance_by_role('remapping_advisor')
-        self.manager_llm_instance = self._get_llm_instance_by_role('manager')
-
-        # Check crucial instances AFTER attempting instantiation
-        if not self.generator_llm_instance or not self.manager_llm_instance:
-             # Manager and Generator are crucial (Refiner can fallback)
-             logger.error("Missing critical LLM instances (Generator or Manager). Step 5 cannot proceed.")
-             raise ValueError("Missing critical LLM configurations for Step 5.")
-
-        # --- Instantiate Agents (Pass LLMs and Tools) ---
-        # Use the specific LLM instances fetched above
-        self.code_generator_agent = get_code_generator_agent(self.generator_llm_instance)
-        self.syntax_validator_agent = get_syntax_validation_agent(self.validator_llm_instance, tools=[self.syntax_validator_tool])
-        self.code_refinement_agent = get_code_refinement_agent(self.refiner_llm_instance)
-        self.file_manager_agent = get_file_manager_agent(self.file_manager_llm_instance, tools=[self.file_writer_tool, self.file_replacer_tool])
-        self.remapping_advisor_agent = get_remapping_advisor_agent(self.remapping_llm_instance, tools=[self.remapping_tool])
-
-        # Log if any LLM instance is missing (should be caught by verification below)
-        if not self.generator_llm_instance: logger.warning("Step5 Generator LLM instance is missing.")
-        if not self.validator_llm_instance: logger.warning("Step5 Validator LLM instance is missing.")
-        if not self.refiner_llm_instance: logger.warning("Step5 Refiner LLM instance is missing.")
-        if not self.file_manager_llm_instance: logger.warning("Step5 File Manager LLM instance is missing.")
-        if not self.remapping_llm_instance: logger.warning("Step5 Remapping Advisor LLM instance is missing.")
-
-        logger.info("Instantiated CrewAI agents for Step 5.")
-
-    def _get_llm_instance_by_role(self, role: str, fallback_llm: Optional[Any] = None) -> Optional[Any]:
-        """
-        Helper to get and instantiate an LLM object for a specific role,
-        potentially falling back to another role's instance.
-        Returns an instantiated LLM object or None.
-        """
-        llm_config = self._get_llm_config(role) # Fetches config dict from Orchestrator's map
-
-        # Use fallback LLM *instance* if config is missing for the current role
-        if not llm_config:
-            logger.warning(f"LLM config for role '{role}' not found.")
-            if fallback_llm:
-                logger.warning(f"Using fallback LLM instance for role '{role}'. Type: {type(fallback_llm)}")
-                return fallback_llm # Return the already instantiated fallback LLM
-            else:
-                logger.error(f"No config for role '{role}' and no fallback LLM provided.")
-                return None
-
-        if not isinstance(llm_config, dict):
-             logger.error(f"Invalid LLM config dictionary type for role '{role}'. Expected dict, got {type(llm_config)}")
-             return None
-
-        # Instantiate based on the llm_config dictionary
-        try:
-             model_identifier = llm_config.get("model")
-             if not model_identifier:
-                 logger.error(f"Model identifier missing in LLM config for role '{role}'. Config: {llm_config}")
-                 return None
-
-             logger.debug(f"Attempting to instantiate LLM for role '{role}' using model '{model_identifier}' with config: {llm_config}")
-
-             # Import necessary classes locally
-             from src.llms.google_genai_llm import GoogleGenAI_LLM
-             from crewai import LLM as CrewAI_LLM
-             import src.config as global_config
-
-             # Prepare arguments explicitly
-             common_args = {
-                 "model": model_identifier,
-                 "temperature": llm_config.get("temperature"),
-                 "top_p": llm_config.get("top_p"),
-                 "top_k": llm_config.get("top_k"),
-                 # Add other common parameters accepted by both constructors if any
-             }
-             # Filter out None values
-             common_args = {k: v for k, v in common_args.items() if v is not None}
-
-             if model_identifier.startswith(("gemini/", "google/")):
-                 gemini_args = common_args.copy()
-                 gemini_args['timeout'] = llm_config.get('timeout', global_config.GEMINI_TIMEOUT)
-                 if llm_config.get('api_key'):
-                     gemini_args['api_key'] = llm_config['api_key']
-                 # Add schema/mime_type if needed for specific roles (e.g., formatter)
-                 # if role == 'formatter':
-                 #     gemini_args['response_schema'] = GodotStructureOutput # Example
-                 #     gemini_args['response_mime_type'] = "application/json" # Example
-
-                 llm_instance = GoogleGenAI_LLM(**gemini_args)
-                 logger.info(f"Successfully instantiated GoogleGenAI_LLM for role '{role}': {model_identifier}")
-             else:
-                 # For default CrewAI LLM, pass only common args.
-                 # It might rely on environment variables for API keys (e.g., OPENAI_API_KEY)
-                 llm_instance = CrewAI_LLM(**common_args)
-                 logger.info(f"Successfully instantiated default crewai.LLM for role '{role}': {model_identifier}")
-
-             return llm_instance
-
-        except ImportError as ie:
-             logger.error(f"Import error during LLM instantiation for role '{role}': {ie}. Check dependencies.")
-             return None
-        except TypeError as te:
-             logger.error(f"Type error during LLM instantiation for role '{role}': {te}. Check config parameters for model '{model_identifier}'. Config: {llm_config}")
-             return None
-        except Exception as e:
-            logger.error(f"Unexpected error during LLM instantiation for role '{role}' with model '{model_identifier}': {e}", exc_info=True)
-            return None
 
     def execute(self, package_ids: Optional[List[str]] = None, force: bool = False, **kwargs) -> bool:
         """
@@ -207,6 +85,53 @@ class Step5Executor(StepExecutor):
         """
         logger.info(f"--- Starting Step 5 Execution: Process Code (Packages: {package_ids or 'All Eligible'}, Force={force}) ---")
 
+        # --- Instantiate LLMs, Tools, and Agents ---
+        # Tools need to be instantiated here as they might have dependencies or state
+        file_writer_tool = FileWriterTool()
+        file_replacer_tool = FileReplacerTool()
+        syntax_validator_tool = GodotSyntaxValidatorTool()
+        # Pass the remapping logic instance to the tool if needed
+        remapping_tool = RemappingLogicTool(remapping_logic=self.remapping_logic)
+        logger.info("Instantiated CrewAI tools for Step 5.")
+
+        # Instantiate LLMs using the helper method
+        generator_llm_instance = self._create_llm_instance('GENERATOR_REFINER_MODEL')
+        validator_llm_instance = self._create_llm_instance('UTILITY_MODEL')
+        refiner_llm_instance = self._create_llm_instance('GENERATOR_REFINER_MODEL')
+        file_manager_llm_instance = self._create_llm_instance('UTILITY_MODEL')
+        remapping_llm_instance = self._create_llm_instance('ANALYZER_MODEL', response_schema_class=RemappingAdvice)
+        manager_llm_instance = self._create_llm_instance('MANAGER_MODEL')
+
+        # Check crucial instances
+        required_llms = {
+            'Generator/Refiner': generator_llm_instance, # Check the primary generator instance
+            'Manager': manager_llm_instance,
+            'Validator': validator_llm_instance,
+            'File Manager': file_manager_llm_instance,
+            'Remapping Advisor': remapping_llm_instance
+        }
+        missing_llms = [name for name, llm in required_llms.items() if not llm]
+        if missing_llms:
+             logger.error(f"Missing critical LLM instances for Step 5: {', '.join(missing_llms)}. Cannot proceed.")
+             self.state_manager.update_workflow_status('failed_step5', f"Missing LLM config for: {', '.join(missing_llms)}")
+             return False
+        # Ensure refiner has a valid instance (either its own or the fallback)
+        if not refiner_llm_instance:
+             logger.error("Critical error: Refiner LLM could not be instantiated (including fallback). Cannot proceed.")
+             self.state_manager.update_workflow_status('failed_step5', "Refiner LLM instance missing.")
+             return False
+
+
+        # Instantiate Agents
+        code_generator_agent = get_code_generator_agent(generator_llm_instance)
+        syntax_validator_agent = get_syntax_validation_agent(validator_llm_instance, tools=[syntax_validator_tool])
+        code_refinement_agent = get_code_refinement_agent(refiner_llm_instance) # Use potentially fallback instance
+        file_manager_agent = get_file_manager_agent(file_manager_llm_instance, tools=[file_writer_tool, file_replacer_tool])
+        # Pass the instantiated tool to the agent
+        remapping_advisor_agent = get_remapping_advisor_agent(remapping_llm_instance, tools=[remapping_tool])
+        logger.info("Instantiated LLMs, Tools, and Agents for Step 5 execution.")
+
+
         # --- Identify Eligible Packages ---
         target_status = 'mapping_defined'
         failed_status_prefixes = ['failed_processing', 'failed_remapping'] # Status prefixes indicating failure in this step
@@ -220,7 +145,6 @@ class Step5Executor(StepExecutor):
         )
 
         # --- Handle Force for 'processed' status ---
-        # _get_eligible_packages currently only forces failed states. We need to handle forcing 'processed' state here.
         packages_to_process_this_run = []
         potential_target_package_ids = set() # Track all packages that *could* be processed
 
@@ -265,8 +189,8 @@ class Step5Executor(StepExecutor):
             final_packages_state = self.state_manager.get_all_packages() # Re-fetch latest state
             for pkg_id in potential_target_package_ids:
                  status = final_packages_state.get(pkg_id, {}).get('status')
-                 # Terminal states for Step 5 are 'processed' or failed states for this step
-                 if not (status == processed_status or any(status.startswith(prefix) for prefix in failed_status_prefixes)):
+                 # Terminal states for Step 5 are 'processed' or failed states for this step or remapping triggered
+                 if not (status == processed_status or status == 'needs_remapping' or any(status.startswith(prefix) for prefix in failed_status_prefixes)):
                       all_potential_targets_done_or_failed = False
                       break
             if all_potential_targets_done_or_failed and potential_target_package_ids:
@@ -280,11 +204,6 @@ class Step5Executor(StepExecutor):
         self.state_manager.update_workflow_status('running_step5')
         overall_success_this_run = True # Tracks success *of this specific execution run*
 
-        # Ensure critical LLMs (manager, generator) are available
-        if not self.manager_llm_instance or not self.generator_llm_instance:
-             logger.error("Manager or Generator LLM instance is missing. Cannot execute Step 5.")
-             self.state_manager.update_workflow_status('failed_step5', "Critical LLM instances missing.")
-             return False
 
         for pkg_id in packages_to_process_this_run:
             logger.info(f"Processing Step 5 for package: {pkg_id}")
@@ -296,53 +215,88 @@ class Step5Executor(StepExecutor):
                 if not pkg_info:
                      raise ValueError(f"Could not retrieve package info for {pkg_id} from state.")
 
-                tasks_artifact = pkg_info.get('artifacts', {}).get('tasks_json')
-                if not tasks_artifact:
-                    # If forcing, maybe try the non-suffixed version?
-                    if force:
-                         tasks_artifact = f"package_{pkg_id}_tasks.json"
-                         logger.warning(f"Remapped tasks artifact not found for forced run of {pkg_id}, trying default: {tasks_artifact}")
-                         # Check if default exists before raising error
-                         tasks_json_path_check = os.path.join(self.analysis_dir, tasks_artifact)
-                         if not os.path.exists(tasks_json_path_check):
-                              raise FileNotFoundError(f"Task list artifact missing for package {pkg_id} (and default not found for force run).")
+                # --- Load Mapping Artifact ---
+                mapping_artifact_name = pkg_info.get('artifacts', {}).get('mapping_json')
+                if not mapping_artifact_name:
+                     # Attempt to load default if forcing a re-run from a failed state?
+                     if force and pkg_info.get('status', '').startswith('failed_'):
+                          mapping_artifact_name = f"package_{pkg_id}_mapping.json"
+                          logger.warning(f"Mapping artifact not explicitly found for forced run of {pkg_id}, trying default: {mapping_artifact_name}")
+                     else:
+                          raise FileNotFoundError(f"Mapping JSON artifact name missing in state for package {pkg_id}.")
+
+                mapping_data = self.state_manager.load_artifact(mapping_artifact_name, expect_json=True)
+                if not mapping_data or not isinstance(mapping_data, dict):
+                     raise FileNotFoundError(f"Failed to load or parse mapping JSON artifact: {mapping_artifact_name}")
+
+                task_groups = mapping_data.get("task_groups", [])
+                if not isinstance(task_groups, list):
+                     raise TypeError(f"Task groups in {mapping_artifact_name} is not a list.")
+
+                # Flatten task items from groups
+                task_items = []
+                for group in task_groups:
+                    if isinstance(group, dict) and isinstance(group.get("tasks"), list):
+                        task_items.extend(group.get("tasks", []))
                     else:
-                         raise FileNotFoundError(f"Task list artifact missing for package {pkg_id}.")
+                        logger.warning(f"Invalid task group format in {mapping_artifact_name}: {group}")
 
+                if not task_items:
+                     logger.warning(f"No task items found in mapping artifact for package {pkg_id}. Skipping processing.")
+                     self.state_manager.update_package_state(pkg_id, status='processed', error="No tasks found in mapping file.")
+                     continue # Skip to next package
 
-                tasks_json_path = os.path.join(self.analysis_dir, tasks_artifact)
-                if not os.path.exists(tasks_json_path):
-                     raise FileNotFoundError(f"Task list file not found: {tasks_json_path}")
+                # --- Assemble Base Context for the Package ---
+                context_parts = []
+                # 1. Instructions
+                instr_context = self.context_manager.get_instruction_context()
 
-                with open(tasks_json_path, 'r', encoding='utf-8') as f:
-                    task_list = json.load(f) # This is the list of tasks
+                # 2. Package Description
+                pkg_desc = pkg_info.get('description', 'N/A')
+                context_parts.append(f"**Current Package ({pkg_id}) Description:**\n{pkg_desc}")
+                # 3. Source Files List
+                source_files = self.context_manager.get_source_file_list(pkg_id)
+                if source_files:
+                    source_list_str = "\n".join([f"- `{f['file_path']}`: {f['role']}" for f in source_files])
+                    context_parts.append(f"**Source Files & Roles for {pkg_id}:**\n{source_list_str}")
+                # 4. Target Files List
+                target_files = self.context_manager.get_target_file_list(pkg_id)
+                if target_files:
+                     target_list_str = "\n".join([f"- `{f['path']}` (Exists: {f['exists']}): {f['purpose']}" for f in target_files])
+                     context_parts.append(f"**Target Files & Status for {pkg_id}:**\n{target_list_str}")
+                # 5. Mapping Strategy (Optional)
+                mapping_strategy = mapping_data.get("mapping_strategy")
+                if mapping_strategy:
+                     context_parts.append(f"**Overall Mapping Strategy for {pkg_id}:**\n{mapping_strategy}")
+                # 6. Source Code Content (Add this to the base context for reference by tasks)
+                # Calculate token budget carefully
+                temp_context_so_far = "\n\n".join(context_parts)
+                tokens_so_far = count_tokens(temp_context_so_far) + count_tokens(instr_context)
+                # Allocate remaining budget, maybe slightly less than 100% to be safe
+                max_source_tokens = int((global_config.MAX_CONTEXT_TOKENS - global_config.PROMPT_TOKEN_BUFFER) * 0.8) - tokens_so_far
+                if max_source_tokens > 0:
+                    source_code = self.context_manager.get_work_package_source_code_content(pkg_id, max_tokens=max_source_tokens)
+                    if source_code:
+                        context_parts.append(f"**Source Code for {pkg_id}:**\n{source_code}")
+                    else:
+                        logger.warning(f"Could not retrieve source code for {pkg_id} within token limits for Step 5 base context.")
+                else:
+                    logger.warning(f"Not enough token budget remaining for source code of {pkg_id} in Step 5 base context.")
 
-                if not isinstance(task_list, list):
-                     raise TypeError(f"Task list loaded from {tasks_json_path} is not a list.")
+                # Combine base context parts
+                package_context_str = "\n\n---\n\n".join(context_parts)
+                base_context_tokens = count_tokens(package_context_str) + count_tokens(instr_context)
+                logger.info(f"Assembled base context for Step 5 - {pkg_id} ({base_context_tokens} tokens).")
 
-                # --- Assemble Context for the Entire Package ---
-                # This context will be shared across tasks within the crew for this package
-                primary_files = pkg_info.get('files', [])
-                dependency_files = self.context_manager._get_dependencies_for_package(primary_files) if hasattr(self.context_manager, '_get_dependencies_for_package') else []
-                # TODO: Decide if existing Godot file content needs to be pre-loaded into context
-                # or if the FileManagerAgent should read it if needed for replacement search blocks.
-                # Pre-loading might hit token limits for large packages/files.
-                # Let's assume for now the manager/generator agent will handle extracting search blocks
-                # from context if the existing code is provided there.
-                package_context_str = self.context_manager.get_context_for_step(
-                    step_name=f"PACKAGE_PROCESSING_{pkg_id}",
-                    primary_relative_paths=primary_files,
-                    dependency_relative_paths=dependency_files,
-                    work_package_id=pkg_id
-                    # Add other relevant package-level info if needed
-                )
-                if not package_context_str:
-                     logger.warning(f"Failed to assemble base context for package {pkg_id}. Crew might lack information.")
-                     # Decide if this is critical enough to skip the package
-                     # continue
 
                 # --- Create CrewAI Tasks for the Package ---
-                crew_tasks = self._create_crewai_tasks_for_package(task_list, package_context_str)
+                # Pass agents instantiated above
+                crew_tasks = self._create_crewai_tasks_for_package(
+                    task_items=task_items,
+                    package_context_str=package_context_str,
+                    instructions=instr_context,
+                    remapping_advisor_agent=remapping_advisor_agent
+                )
                 if not crew_tasks:
                      logger.error(f"Failed to create CrewAI tasks for package {pkg_id}. Skipping package.")
                      self.state_manager.update_package_state(pkg_id, status='failed_processing', error="Failed to create internal tasks.")
@@ -352,26 +306,22 @@ class Step5Executor(StepExecutor):
                 # --- Create and Run Hierarchical Crew ---
                 package_crew = Crew(
                     agents=[ # List ALL worker agents
-                        self.code_generator_agent,
-                        self.syntax_validator_agent,
-                        self.code_refinement_agent,
-                        self.file_manager_agent,
-                        self.remapping_advisor_agent
+                        code_generator_agent,
+                        syntax_validator_agent,
+                        code_refinement_agent,
+                        file_manager_agent,
+                        remapping_advisor_agent
                     ],
                     tasks=crew_tasks, # Tasks for the manager to orchestrate
                     process=Process.hierarchical,
                     # Assign only the essential manager_llm for hierarchical process
-                    manager_llm=self.manager_llm_instance,
-                    # Removed explicit chat_llm, planning_llm, function_calling_llm
-                    # manager_agent=self.manager_agent, # Or provide a custom manager agent instance
+                    manager_llm=manager_llm_instance,
                     memory=True, # Enable memory for context persistence within the package run
-                    # planning=True, # Consider enabling Crew planning feature
                     verbose=True,
                     task_callback=self._log_step5_task_completion # Add the callback
-                    # step_callback=self.log_step, # Optional callbacks for detailed logging
                 )
 
-                logger.info(f"Kicking off Hierarchical Crew for Package {pkg_id} with {len(task_list)} items...")
+                logger.info(f"Kicking off Hierarchical Crew for Package {pkg_id} with {len(task_items)} items...")
                 # Pass package-level inputs if needed by tasks (e.g., package ID)
                 crew_inputs = {'package_id': pkg_id}
                 crew_result = package_crew.kickoff(inputs=crew_inputs)
@@ -408,25 +358,12 @@ class Step5Executor(StepExecutor):
                      logger.error(f"Unexpected final crew output type for {pkg_id}: {type(final_output_str)}")
 
 
-                # Determine overall package success - needs refinement.
-                # Option 1: Rely solely on RemappingAdvisor output (if it ran successfully).
-                # Option 2: Inspect individual task results within the crew's execution report (if accessible).
-                # For now, let's assume failure if we couldn't get valid remapping advice,
-                # or if the advice explicitly mentions failures. A more robust check might be needed.
+                # Determine overall package success
                 if parsed_advice is None:
                      package_success = False
                      logger.error(f"Package {pkg_id} processing failed: Could not determine remapping advice from crew output.")
-                     # Try to find specific errors in the crew's task outputs if available
-                     # This part depends on how CrewAI exposes task results in hierarchical mode.
-                     # Placeholder: Check crew.usage_metrics or task outputs if they exist
-                     # if hasattr(package_crew, 'tasks') and package_crew.tasks:
-                     #      for task_run in package_crew.tasks:
-                     #           if hasattr(task_run, 'output') and 'failed' in str(task_run.output).lower():
-                     #                package_processing_errors.append(f"Task '{task_run.description[:50]}...' potentially failed.")
-
+                     # TODO: Potentially inspect individual task results if accessible
                 else:
-                     # If advice was parsed, assume the crew completed. Success depends on whether remapping is needed.
-                     # If remapping is recommended, the package technically "failed" this processing attempt.
                      package_success = not parsed_advice.recommend_remapping
 
                 # Store detailed results (raw output or parsed task results) as an artifact
@@ -434,13 +371,14 @@ class Step5Executor(StepExecutor):
                 package_report_path = os.path.join(self.analysis_dir, package_report_filename)
                 try:
                     os.makedirs(self.analysis_dir, exist_ok=True)
-                    # Save the raw result or structure if available
                     report_content = crew_result if isinstance(crew_result, (dict, list)) else {'raw_output': str(crew_result)}
-                    # TODO: Ideally, save structured results of *all* tasks if accessible from crew object
                     with open(package_report_path, 'w', encoding='utf-8') as f:
                         json.dump(report_content, f, indent=2)
                     logger.info(f"Saved crew results report: {package_report_path}")
-                    self.state_manager.update_package_state(pkg_id, status='processing_report_generated', artifacts={'crew_results_report': package_report_filename})
+                    # Update state with the report artifact path
+                    current_artifacts = pkg_info.get('artifacts', {})
+                    current_artifacts['crew_results_report'] = package_report_filename
+                    self.state_manager.update_package_state(pkg_id, artifacts=current_artifacts) # Only update artifacts here
                 except IOError as e:
                     logger.error(f"Failed to save crew results report {package_report_path}: {e}")
 
@@ -454,25 +392,18 @@ class Step5Executor(StepExecutor):
                     current_remapping_attempts = pkg_info.get('remapping_attempts', 0)
                     max_remap = self.config.get("MAX_REMAPPING_ATTEMPTS", 1)
 
-                    # Check if max attempts reached
                     if current_remapping_attempts >= max_remap:
                         logger.warning(f"Max remapping attempts ({max_remap}) reached for package {pkg_id}. Marking as failed_remapping.")
                         self.state_manager.update_package_state(pkg_id, status='failed_remapping', error=f"Max remapping attempts reached. Last error: {error_reason}")
-                    # Check if remapping is recommended by the advisor tool (via parsed_advice)
                     elif parsed_advice and parsed_advice.recommend_remapping:
                         logger.info(f"Remapping recommended for package {pkg_id} by RemappingAdvisorAgent (Attempt {current_remapping_attempts + 1}). Reason: {parsed_advice.reason}")
-                        # Set status to 'needs_remapping'. Orchestrator handles calling Step 4 again.
                         self.state_manager.update_package_state(pkg_id, status='needs_remapping', error=f"Remapping recommended: {parsed_advice.reason}", increment_remap_attempt=True)
-                        # Don't mark overall_success_this_run as False if remapping is triggered
                     else:
-                        # Failures occurred, but remapping not recommended or advice parsing failed
                         logger.info(f"Failures detected for package {pkg_id}, but remapping not recommended or advisor failed.")
                         final_error = error_reason if error_reason else "Package processing failed, but remapping condition not met or advisor failed."
-                        if package_processing_errors:
-                             final_error += f" Specific errors: {'; '.join(package_processing_errors)}"
+                        # TODO: Extract specific errors from report_content if possible
                         self.state_manager.update_package_state(pkg_id, status='failed_processing', error=final_error)
                 else:
-                    # Package processed successfully according to crew result analysis
                     logger.info(f"Hierarchical crew processed package {pkg_id} successfully.")
                     self.state_manager.update_package_state(pkg_id, status='processed')
 
@@ -481,10 +412,7 @@ class Step5Executor(StepExecutor):
                 self.state_manager.update_package_state(pkg_id, status='failed_processing', error=f"Critical executor error during crew setup/kickoff: {e}")
                 overall_success_this_run = False
 
-        # --- Final Workflow Status Check (Remains largely the same) ---
-        # ... (keep existing logic for checking if all potential targets are done/failed/remapping) ...
-        # This logic correctly checks for terminal states including 'needs_remapping'
-        # --- Start of existing final check logic ---
+        # --- Final Workflow Status Check ---
         all_potential_targets_done_or_failed = True
         final_packages_state = self.state_manager.get_all_packages() # Re-fetch latest state
         for pkg_id in potential_target_package_ids: # Check against potential targets determined at start
@@ -496,7 +424,6 @@ class Step5Executor(StepExecutor):
                   break
 
         if all_potential_targets_done_or_failed and potential_target_package_ids:
-             # Check if any package still needs remapping
              needs_remapping_pending = any(p.get('status') == 'needs_remapping' for p_id, p in final_packages_state.items() if p_id in potential_target_package_ids) # Check only potential targets
              if not needs_remapping_pending:
                   logger.info("All potential target packages for Step 5 are now processed or failed.")
@@ -505,37 +432,32 @@ class Step5Executor(StepExecutor):
                        self.state_manager.update_workflow_status('step5_complete') # Or 'completed'
              else:
                   logger.info("Step 5 finished processing available packages, but some require remapping.")
-                  # Keep status as 'running_step5' or let orchestrator handle 'needs_remapping' status
         elif not overall_success_this_run:
-             # If any package failed *in this specific run* and didn't trigger remapping
              current_global_status = self.state_manager.get_state().get('workflow_status')
              if not (current_global_status and 'failed' in current_global_status):
                   self.state_manager.update_workflow_status('failed_step5', "One or more packages failed during code processing in the latest run.")
-        # --- End of existing final check logic ---
 
 
         logger.info(f"--- Finished Step 5 Execution Run (Overall Success This Run: {overall_success_this_run}) ---")
         return overall_success_this_run
 
     # --- Helper Method to Create Tasks ---
-    def _create_crewai_tasks_for_package(self, task_items: List[Dict[str, Any]], package_context_str: str) -> List[Task]:
+    def _create_crewai_tasks_for_package(self,
+                                         task_items: List[Dict[str, Any]],
+                                         package_context_str: str,
+                                         instructions: Optional[str],
+                                         remapping_advisor_agent: Agent) -> List[Task]:
         """Creates the list of CrewAI tasks for a work package."""
         crew_tasks: List[Task] = []
         item_processing_tasks: List[Task] = [] # Keep track of item tasks for final analysis context
 
-        # Ensure task creators are initialized (should be done in __init__)
-        if not hasattr(self, 'item_task_creator') or not hasattr(self, 'analysis_task_creator'):
-             logger.error("Task creators not initialized in Step5Executor.")
-             return []
-
         for task_item in task_items:
             # Create task for the manager to process this item
-            # Note: manager_agent is implicit in hierarchical process, task guides it.
-            # Dependencies between items are complex; let manager handle sequence for now.
-            item_task = self.item_task_creator.create_task(
+            item_task = create_hierarchical_process_taskitem_task(
                 manager_agent=None, # Manager is implicit
                 task_item_details=task_item,
                 package_context=package_context_str,
+                instructions=instructions,
                 dependent_tasks=None # Let manager handle sequence/context flow
             )
             crew_tasks.append(item_task)
@@ -543,9 +465,10 @@ class Step5Executor(StepExecutor):
 
         # Add the final analysis task that depends on all item tasks
         if item_processing_tasks: # Only add if there were items to process
-             analysis_task = self.analysis_task_creator.create_task(
-                 advisor_agent=self.remapping_advisor_agent,
-                 all_item_results_context=item_processing_tasks # Pass the list of item tasks
+             analysis_task = create_analyze_package_failures_task(
+                 advisor_agent=remapping_advisor_agent,
+                 all_item_results_context=item_processing_tasks,
+                 instructions=instructions
              )
              crew_tasks.append(analysis_task)
         else:

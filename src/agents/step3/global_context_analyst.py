@@ -23,7 +23,8 @@ def get_global_context_analyst_agent(llm_instance: BaseLLM):
             "You are an architect overseeing a large-scale code migration project. Your primary responsibility is to ensure consistency "
             "and coherence across different modules (packages). You review the overall project state, including work done on other packages, "
             "to provide guidance and identify potential issues before new structures are defined for a specific package. "
-            "You focus on preventing naming collisions and maintaining a logical global project organization."
+            "You focus on preventing naming collisions and maintaining a logical global project organization. "
+            "Make sure we only define structures that are not already covered by other packages. "
         ),
         llm=llm_instance,
         verbose=True,

@@ -5,6 +5,8 @@ from typing import Any, Dict, List, Optional, Tuple, Type
 import networkx as nx
 from crewai import Crew, Process
 
+from src.llms.litellm_gemini_llm import LiteLLMGeminiLLM
+
 from ..step_executor import StepExecutor
 from ..state_manager import StateManager
 from ..context_manager import ContextManager, count_tokens, read_file_content
@@ -13,11 +15,10 @@ import src.config as global_config # Use alias for clarity
 
 from src.utils.clustering_utils import cluster_files_by_dependency
 from src.agents.step2.package_describer import get_package_describer_agent
-from src.tasks.step2.describe_package import DescribePackageTask, PackageDescriptionOutput
+from src.tasks.step2.describe_package import create_describe_package_task, PackageDescriptionOutput
 from src.agents.step2.package_refiner import get_package_refinement_agent
-from src.tasks.step2.refine_descriptions import RefineDescriptionsTask, RefinedDescriptionsOutput
-from crewai import LLM as CrewAI_LLM # Alias default LLM
-from src.llms.google_genai_llm import GoogleGenAI_LLM
+from src.tasks.step2.refine_descriptions import create_refined_descriptions_task, RefinedDescriptionsOutput
+from crewai import LLM as CrewAI_LLM
 from src.utils.json_utils import parse_json_from_string
 
 logger = get_logger(__name__)
@@ -106,44 +107,7 @@ class Step2Executor(StepExecutor):
         logger.info("Finished pre-calculating token counts.")
         return file_token_counts
 
-    # --- Context Assembly for Description Task ---
-    def _assemble_description_context(self, package_files: List[str], token_limit: int) -> Tuple[str, str]:
-        """
-        Assembles the context string for the DescribePackageTask, trying full content,
-        then interfaces, then just paths, respecting the token limit.
-
-        Returns:
-            Tuple[str, str]: (context_string, content_type_used)
-        """
-        content_map = {}
-        total_content_tokens = 0
-        context_str = ""
-        content_type_used = "paths" # Default
-
-        # Try full cleaned content
-        for file_path in package_files:
-            abs_path_str = str(self.cpp_source_dir / file_path)
-            content = read_file_content(abs_path_str, remove_comments_blank_lines=True)
-            if content is not None:
-                content_map[file_path] = content
-                total_content_tokens += count_tokens(content)
-            else:
-                content_map[file_path] = f"// Error: Could not read file {file_path}"
-                total_content_tokens += count_tokens(content_map[file_path])
-
-        if total_content_tokens <= token_limit:
-            logger.debug(f"Using full cleaned content ({total_content_tokens} tokens) for package description.")
-            parts = [f"// File: {fp}\n{content_map[fp]}" for fp in package_files]
-            context_str = "\n\n".join(parts)
-            content_type_used = "full content"
-            return context_str, content_type_used
-
-        # Fallback to file paths only if full content exceeds the limit
-        logger.warning(f"Full content ({total_content_tokens} tokens) exceeds limit ({token_limit}). Using file paths only.")
-        context_str = "// File Paths Only:\n" + "\n".join(package_files)
-        content_type_used = "paths"
-        return context_str, content_type_used
-
+    # _assemble_description_context is removed. ContextManager.get_work_package_source_code_content will be used directly.
 
     # --- Main Execution Logic ---
     def execute(self, package_ids: Optional[List[str]] = None, force: bool = False, **kwargs) -> bool:
@@ -177,13 +141,13 @@ class Step2Executor(StepExecutor):
         else:
             # Normal execution: check if resuming is possible
             self.state_manager.update_workflow_status('running_step2')
-            # Use package data loaded by ContextManager during its initialization
-            current_packages_data = self.context_manager.packages_data.copy()
+            # Check StateManager for existing packages to determine if resuming
+            current_packages_data = self.state_manager.get_all_packages() # Get packages from state
             if current_packages_data:
-                logger.info("Resuming package description using data from ContextManager.")
+                logger.info(f"Resuming package description using data from StateManager ({len(current_packages_data)} packages found).")
                 resuming_from_file = True
             else:
-                logger.info("No valid existing package data found in ContextManager. Performing full partitioning.")
+                logger.info("No valid existing package data found in StateManager. Performing full partitioning.")
                 resuming_from_file = False
 
         success = False
@@ -262,39 +226,17 @@ class Step2Executor(StepExecutor):
             final_packages_output = {} # This will accumulate results as we go
 
             # --- START: LLM Call Section ---
-            analyzer_llm_config = self._get_llm_config('analyzer') # Get config dict
-            analyzer_llm_instance = None # Initialize LLM instance variable
-
-            if analyzer_llm_config:
-                model_identifier = analyzer_llm_config.get("model", "")
-                try:
-                     if model_identifier.startswith("gemini/"):
-                         # Pass timeout from the imported config module
-                         analyzer_llm_config['timeout'] = global_config.GEMINI_TIMEOUT
-                         analyzer_llm_config['response_schema'] = PackageDescriptionOutput
-                         analyzer_llm_config['response_mime_type'] = "application/json"
-                         analyzer_llm_instance = GoogleGenAI_LLM(**analyzer_llm_config)
-                         logger.info(f"Instantiated custom GoogleGenAI_LLM for role 'analyzer': {model_identifier} with timeout {global_config.GEMINI_TIMEOUT}s, JSON output, and PackageDescriptionOutput schema")
-                     else:
-                         # Default CrewAI LLM might not support 'timeout' directly, pass only relevant args
-                        # Filter analyzer_llm_config if necessary for CrewAI_LLM
-                        analyzer_llm_instance = CrewAI_LLM(**analyzer_llm_config)
-                        logger.info(f"Instantiated default crewai.LLM for role 'analyzer': {model_identifier}")
-                except Exception as e:
-                    logger.error(f"Failed to instantiate LLM for role 'analyzer' ({model_identifier}): {e}", exc_info=True)
-                    analyzer_llm_instance = None # Explicitly set to None on error
-            else:
-                logger.error("Analyzer LLM configuration ('analyzer') not found. Cannot generate package descriptions.")
-                analyzer_llm_instance = None
+            analyzer_llm_instance = self._create_llm_instance(llm_role='ANALYZER_MODEL', response_schema_class=PackageDescriptionOutput)
 
             if not analyzer_llm_instance:
                 logger.warning("Proceeding without LLM-generated package descriptions.")
                 # Fill in placeholders for any missing descriptions
                 needs_save = False
                 for pkg_name, pkg_data in current_packages_data.items():
-                    invalid_descs = {None, "", "Error: Failed to generate description", "N/A (LLM 'analyzer' not configured)", "N/A (LLM 'analyzer' not available)"}
+                    # Use the config constant name in the placeholder message
+                    invalid_descs = {None, "", "Error: Failed to generate description", f"N/A (LLM '{global_config.ANALYZER_MODEL}' not configured)", f"N/A (LLM '{global_config.ANALYZER_MODEL}' not available)"}
                     if pkg_data.get("description") in invalid_descs:
-                         pkg_data["description"] = "N/A (LLM 'analyzer' not available)"
+                         pkg_data["description"] = f"N/A (LLM '{global_config.ANALYZER_MODEL}' not available)"
                          pkg_data["file_roles"] = [{"file_path": f, "role": "N/A"} for f in pkg_data.get("files", [])]
                          needs_save = True
                 # Use the potentially updated data as the final output in this case
@@ -306,9 +248,8 @@ class Step2Executor(StepExecutor):
 
             else: # LLM instance IS available
                  logger.info("LLM instance available. Proceeding with description generation...")
-                 # Setup agent and task creator
+                 # Setup agent
                  describer_agent = get_package_describer_agent(llm_instance=analyzer_llm_instance)
-                 task_creator = DescribePackageTask()
                  max_retries = self.config.get("LLM_CALL_RETRIES", LLM_CALL_RETRIES)
 
                  # Determine token limit for description context
@@ -338,8 +279,8 @@ class Step2Executor(StepExecutor):
 
                      # --- Check if description already exists ---
                      existing_desc = package_data.get("description")
-                     # Define known invalid/placeholder descriptions
-                     invalid_descs = {None, "", "Error: Failed to generate description", "N/A (LLM 'analyzer' not configured)", "N/A (LLM 'analyzer' not available)"}
+                     # Use the config constant name in the placeholder message check
+                     invalid_descs = {None, "", "Error: Failed to generate description", f"N/A (LLM '{global_config.ANALYZER_MODEL}' not configured)", f"N/A (LLM '{global_config.ANALYZER_MODEL}' not available)"}
                      if existing_desc not in invalid_descs:
                           logger.info(f"Description already exists for {package_name}. Skipping LLM call.")
                           # Ensure it's included in final output
@@ -350,16 +291,30 @@ class Step2Executor(StepExecutor):
                      # --- Description needed, proceed with LLM call ---
                      logger.info(f"Generating description for {package_name}...")
 
-                     # Assemble context for this package
-                     context_str, content_type = self._assemble_description_context(files, desc_token_limit)
-                     logger.debug(f"Using context type '{content_type}' for {package_name} description.")
+                     # Retrieve source code context using the new ContextManager method
+                     source_code_context = self.context_manager.get_work_package_source_code_content(
+                         package_id=package_name, # Assuming package_name is the ID used by ContextManager
+                         max_tokens=desc_token_limit
+                     )
+                     if not source_code_context:
+                         logger.warning(f"Could not retrieve source code context for {package_name}. Task might lack information.")
+                         # Provide minimal context indicating failure
+                         source_code_context = f"// Error: Failed to retrieve source code content for package {package_name}."
 
-                     # Create the task
-                     # The DescribePackageTask sets output_json=PackageDescriptionOutput, which acts as validation/fallback.
-                     describe_task = task_creator.create_task(describer_agent, files, context_str)
+                     logger.debug(f"Using source code context retrieved via ContextManager for {package_name} description.")
+
+                     # Fetch general instructions
+                     instruction_context = self.context_manager.get_instruction_context()
+
+                     # Create the task using the imported function
+                     describe_task = create_describe_package_task(
+                         agent=describer_agent,
+                         package_files=files,
+                         context=source_code_context,
+                         instructions=instruction_context
+                     )
 
                      # Create and run the Crew, passing the specific LLM instance
-                     logger.debug(f"DEBUG: Analyzer LLM Config used: {analyzer_llm_config}")
                      logger.debug(f"DEBUG: Analyzer LLM Instance Type: {type(analyzer_llm_instance)}")
                      logger.debug(f"DEBUG: Analyzer LLM Instance Model: {getattr(analyzer_llm_instance, 'model', 'N/A')}")
 
@@ -455,53 +410,49 @@ class Step2Executor(StepExecutor):
 
                  # --- START: Refinement Step ---
                  # Only run refinement if the initial description LLM was available and we have packages
-                 if analyzer_llm_instance and final_packages_output:
+                 if final_packages_output:
                      logger.info("--- Starting Package Description Refinement Step ---")
                      try:
                          # --- Instantiate Refiner LLM ---
-                         # Use a separate instance configured for the refinement task's output schema
-                         refiner_llm_instance = None
-                         if analyzer_llm_config: # Check if base config exists
-                             model_identifier = analyzer_llm_config.get("model", "")
-                             # Create a distinct config for the refiner
-                             refiner_config = analyzer_llm_config.copy() # Start with analyzer config, includes timeout etc.
-                             try:
-                                 if model_identifier.startswith("gemini/"):
-                                     # Configure specifically for RefinedDescriptionsOutput schema
-                                     refiner_config['response_schema'] = RefinedDescriptionsOutput
-                                     refiner_config['response_mime_type'] = "application/json" # Ensure mime type
-                                     refiner_llm_instance = GoogleGenAI_LLM(**refiner_config)
-                                     logger.info(f"Instantiated separate GoogleGenAI_LLM for refinement: {model_identifier} with RefinedDescriptionsOutput schema")
-                                 else:
-                                     # Instantiate standard CrewAI LLM for refinement if not Gemini
-                                     refiner_llm_instance = CrewAI_LLM(**refiner_config)
-                                     logger.info(f"Instantiated separate default crewai.LLM for refinement: {model_identifier}")
-                             except Exception as e_refine:
-                                 logger.error(f"Failed to instantiate separate LLM for refinement ({model_identifier}): {e_refine}", exc_info=True)
-                                 refiner_llm_instance = None # Fallback
-                         else:
-                              logger.error("Analyzer LLM config was missing, cannot create separate refiner LLM instance.")
+                         # Use the helper method again, potentially with a different schema
+                         # User edit specified GENERATOR_REFINER_MODEL role
+                         refiner_llm_instance = self._create_llm_instance(
+                             llm_role='GENERATOR_REFINER_MODEL',
+                             response_schema_class=RefinedDescriptionsOutput
+                         )
 
                          # Proceed only if refiner LLM was successfully created
                          if not refiner_llm_instance:
                               logger.error("Skipping refinement step because the refiner LLM instance could not be created.")
                          else:
                               # --- Refinement Crew Setup ---
-                              refiner_agent = get_package_refinement_agent(llm_instance=refiner_llm_instance) # Use dedicated instance
-                              refinement_task_creator = RefineDescriptionsTask()
 
-                              # Prepare context - use the state accumulated so far
-                              refinement_context = final_packages_output
+                              # Prepare context - format the accumulated package data as a JSON string
+                              try:
+                                  # Import json if not already imported at the top
+                                  import json
+                                  refinement_context_str = json.dumps(final_packages_output, indent=2)
+                                  logger.debug(f"Prepared refinement context string ({len(refinement_context_str)} chars).")
+                              except TypeError as e:
+                                  logger.error(f"Failed to serialize final_packages_output to JSON for refinement context: {e}")
+                                  refinement_context_str = "// Error: Could not format package data for refinement."
 
                               # The RefineDescriptionsTask sets output_json=RefinedDescriptionsOutput for validation/fallback
-                              refine_task = refinement_task_creator.create_task(refiner_agent, refinement_context)
+                              refiner_agent = get_package_refinement_agent(llm_instance=refiner_llm_instance)
+                              # Fetch general instructions again for the refinement task
+                              instruction_context = self.context_manager.get_instruction_context()
+                              refine_task = create_refined_descriptions_task(
+                                  agent=refiner_agent,
+                                  all_packages_data=final_packages_output, # Pass the dict directly
+                                  instructions=instruction_context
+                              )
 
                               refinement_crew = Crew(
                                   agents=[refiner_agent],
                                   tasks=[refine_task],
                                   process=Process.sequential,
                                   llm=refiner_llm_instance,
-                                  verbose=1 # Or configure via self.config
+                                  verbose=True
                               )
 
                               logger.info("Kicking off refinement crew...")
@@ -516,27 +467,38 @@ class Step2Executor(StepExecutor):
                                   logger.warning(f"Refinement crew returned unexpected result type: {type(refinement_result)}")
 
                               if raw_refinement_output:
-                                  refined_descriptions_dict = parse_json_from_string(raw_refinement_output)
+                                  parsed_refinement_json = parse_json_from_string(raw_refinement_output)
 
-                                  if isinstance(refined_descriptions_dict, dict):
-                                      logger.info(f"Successfully parsed refinement results ({len(refined_descriptions_dict)} entries). Applying updates...")
-                                      update_count = 0
-                                      for pkg_name, refined_desc in refined_descriptions_dict.items():
-                                          if pkg_name in final_packages_output and isinstance(refined_desc, str):
-                                              if final_packages_output[pkg_name]['description'] != refined_desc:
-                                                  logger.debug(f"Updating description for {pkg_name}")
-                                                  final_packages_output[pkg_name]['description'] = refined_desc
-                                                  update_count += 1
+                                  if isinstance(parsed_refinement_json, dict) and 'package_descriptions' in parsed_refinement_json:
+                                      refined_list = parsed_refinement_json['package_descriptions']
+                                      if isinstance(refined_list, list):
+                                          logger.info(f"Successfully parsed refinement results ({len(refined_list)} entries). Applying updates...")
+                                          update_count = 0
+                                          for item in refined_list:
+                                              if isinstance(item, dict) and 'package_id' in item and 'package_description' in item:
+                                                  pkg_id = item['package_id']
+                                                  refined_desc = item['package_description']
+
+                                                  if pkg_id in final_packages_output and isinstance(refined_desc, str):
+                                                      if final_packages_output[pkg_id]['description'] != refined_desc:
+                                                          logger.debug(f"Updating description for {pkg_id}")
+                                                          final_packages_output[pkg_id]['description'] = refined_desc
+                                                          update_count += 1
+                                                      else:
+                                                          logger.debug(f"Refined description for {pkg_id} is the same as initial. Skipping update.")
+                                                  else:
+                                                      logger.warning(f"Skipping refinement update for '{pkg_id}': Package not found in original data or refined description is not a string.")
                                               else:
-                                                   logger.debug(f"Refined description for {pkg_name} is the same as initial. Skipping update.")
-                                          else:
-                                              logger.warning(f"Skipping refinement update for '{pkg_name}': Package not found in original data or refined description is not a string.")
-                                      logger.info(f"Applied {update_count} refined descriptions.")
-                                      # Save the refined data immediately
-                                      logger.info("Saving updated package data with refined descriptions via ContextManager...")
-                                      self.context_manager.save_packages_data(final_packages_output)
+                                                  logger.warning(f"Skipping invalid item in refined_descriptions list: {item}")
+
+                                          logger.info(f"Applied {update_count} refined descriptions.")
+                                          # Save the refined data immediately
+                                          logger.info("Saving updated package data with refined descriptions via ContextManager...")
+                                          self.context_manager.save_packages_data(final_packages_output)
+                                      else:
+                                          logger.error("Parsed refinement JSON has 'package_descriptions' but it's not a list.")
                                   else:
-                                      logger.error("Failed to parse refinement result dictionary from LLM output.")
+                                      logger.error("Failed to parse refinement result dictionary or 'package_descriptions' key missing from LLM output.")
                               else:
                                   logger.error("Refinement crew did not return a usable string output.")
                               # --- End Refinement Crew Execution ---
@@ -662,39 +624,47 @@ class Step2Executor(StepExecutor):
 
     def _calculate_package_order(self, pkg_graph: nx.DiGraph) -> Optional[List[str]]:
         """
-        Calculates a processing order for packages using topological sort (Kahn's algorithm),
-        prioritizing nodes with lower out-degree when multiple nodes have an in-degree of 0.
+        Calculates a processing order for packages prioritizing high importance (PageRank)
+        and low number of dependencies (out-degree). Handles cycles.
 
         Args:
             pkg_graph: The package dependency graph (DiGraph) where an edge P_A -> P_B
                        means P_A depends on P_B.
 
         Returns:
-            A list of package names in a valid processing order, or None if a cycle is detected.
+            A list of package names in the calculated processing order,
+            or a fallback order (e.g., alphabetical) if an error occurs.
         """
-        logger.info("Calculating package processing order using PageRank...")
+        logger.info("Calculating package processing order using combined PageRank and Out-Degree heuristic...")
         if not pkg_graph or not pkg_graph.nodes():
             logger.warning("Package graph is empty or has no nodes. Cannot calculate order.")
             return []
 
         try:
-            # Calculate PageRank - higher score means more important (depended upon more)
-            # Note: pagerank handles cycles inherently.
-            # We might need to adjust alpha (damping factor) or other params if needed.
+            # Calculate PageRank
             pagerank_scores = nx.pagerank(pkg_graph)
 
-            # Sort packages by PageRank score in descending order
-            # Packages with higher scores (more depended upon) come first.
-            ordered_packages = sorted(pagerank_scores, key=pagerank_scores.get, reverse=True)
+            # Calculate combined score for each package
+            package_scores = {}
+            for pkg in pkg_graph.nodes():
+                out_degree = pkg_graph.out_degree(pkg)
+                # Ensure pagerank score exists, default to 0 if not (shouldn't happen)
+                pr_score = pagerank_scores.get(pkg, 0.0)
+                # Score: Higher PageRank is better, lower Out-Degree is better
+                # Add 1.0 to out_degree to avoid division by zero and ensure float division
+                package_scores[pkg] = pr_score / (float(out_degree) + 1.0)
 
-            logger.info(f"Successfully calculated package processing order using PageRank: {ordered_packages}")
+            # Sort packages by the combined score in descending order
+            ordered_packages = sorted(package_scores, key=package_scores.get, reverse=True)
+
+            logger.info(f"Successfully calculated package processing order using combined heuristic: {ordered_packages}")
             # Log scores for debugging if needed
-            # for pkg in ordered_packages: logger.debug(f"  - {pkg}: {pagerank_scores[pkg]:.4f}")
+            # for pkg in ordered_packages:
+            #     logger.debug(f"  - {pkg}: Score={package_scores[pkg]:.4f} (PR={pagerank_scores.get(pkg, 0.0):.4f}, OutDegree={pkg_graph.out_degree(pkg)})")
+
             return ordered_packages
 
         except Exception as e:
-            logger.error(f"Error calculating PageRank for package order: {e}", exc_info=True)
-            # Fallback: return packages in an arbitrary order (e.g., sorted alphabetically)
-            # or None to indicate failure. Let's return sorted list as a fallback.
-            logger.warning("Falling back to alphabetical package order due to PageRank error.")
+            logger.error(f"Error calculating combined heuristic score for package order: {e}", exc_info=True)
+            logger.warning("Falling back to alphabetical package order due to calculation error.")
             return sorted(list(pkg_graph.nodes()))

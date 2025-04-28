@@ -3,15 +3,16 @@
 import os
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Type # Added Type
+from typing import Any, Dict, List, Optional, Set, Type
 
 # CrewAI imports
 from crewai import Crew, Process, Task, Agent
+from crewai.crews.crew_output import CrewOutput # Import for handling crew result type
 
 # Local application imports
 from ..step_executor import StepExecutor
 from ..state_manager import StateManager
-from ..context_manager import ContextManager
+from ..context_manager import ContextManager, count_tokens, read_godot_file_content
 
 # Import NEW agents for Step 4
 from src.agents.step4.cpp_code_analyst import get_cpp_code_analyst_agent
@@ -21,13 +22,12 @@ from src.agents.step4.task_decomposer import get_task_decomposer_agent
 from src.agents.step4.json_output_formatter import get_json_output_fomratter_agent
 
 # Import NEW Task definition for Step 4
-from src.tasks.step4.define_mapping import HierarchicalDefineMappingTask, MappingOutput # Import Pydantic model too
+from src.tasks.step4.define_mapping import create_hierarchical_define_mapping_task, MappingOutput
 
 # Import utilities
-from src.utils.parser_utils import parse_json_from_string # Keep for parsing final output if needed
-from src.utils.formatting_utils import format_structure_to_markdown
+from src.utils.json_utils import parse_json_from_string
 from src.logger_setup import get_logger
-import src.config as config
+import src.config as global_config # Use alias
 # Import TaskOutput for type hinting the callback parameter
 from crewai.tasks.task_output import TaskOutput
 
@@ -43,110 +43,7 @@ class Step4Executor(StepExecutor):
                  llm_configs: Dict[str, Dict[str, Any]],
                  tools: Dict[Type, Any]): # Tools might not be needed here unless agents use them
         super().__init__(state_manager, context_manager, config_dict, llm_configs, tools)
-
-        # --- Instantiate Task Creator ---
-        self.mapping_task_creator = HierarchicalDefineMappingTask()
-        logger.info("Instantiated Task creator for Step 4.")
-
-        # --- Get LLM Instances ---
-        # Define grouped roles used by Step 4 agents + manager
-        analyzer_config = self._get_llm_config('analyzer')
-        designer_planner_config = self._get_llm_config('designer_planner')
-        utility_config = self._get_llm_config('utility')
-        manager_config = self._get_llm_config('manager')
-
-        # Get LLM instances using grouped roles
-        self.cpp_analyst_llm = self._get_llm_instance_by_role('analyzer', analyzer_config)
-        self.godot_analyst_llm = self._get_llm_instance_by_role('analyzer', analyzer_config)
-        self.strategist_llm = self._get_llm_instance_by_role('designer_planner', designer_planner_config)
-        self.decomposer_llm = self._get_llm_instance_by_role('designer_planner', designer_planner_config)
-        self.formatter_llm = self._get_llm_instance_by_role('utility', utility_config)
-        self.manager_llm = self._get_llm_instance_by_role('manager', manager_config)
-
-        if not self.manager_llm: # Manager is crucial
-             logger.error("Missing critical LLM configuration for Step 4 Manager role. Cannot proceed.")
-             raise ValueError("Missing critical LLM configuration for Step 4 Manager role.")
-
-        # --- Instantiate Agents ---
-        # Use the specific LLM instances fetched above
-        self.cpp_analyst_agent = get_cpp_code_analyst_agent(self.cpp_analyst_llm)
-        self.godot_analyst_agent = get_godot_structure_analyst_agent(self.godot_analyst_llm)
-        self.strategist_agent = get_conversation_strategist_agent(self.strategist_llm)
-        self.decomposer_agent = get_task_decomposer_agent(self.decomposer_llm)
-        self.formatter_agent = get_json_output_fomratter_agent(self.formatter_llm)
-
-        # Log if any LLM instance is missing (should be caught by verification below)
-        if not self.cpp_analyst_llm: logger.warning("Step4 Cpp Analyst LLM instance is missing.")
-        if not self.godot_analyst_llm: logger.warning("Step4 Godot Analyst LLM instance is missing.")
-        if not self.strategist_llm: logger.warning("Step4 Strategist LLM instance is missing.")
-        if not self.decomposer_llm: logger.warning("Step4 Decomposer LLM instance is missing.")
-        if not self.formatter_llm: logger.warning("Step4 Formatter LLM instance is missing.")
-
-        logger.info("Instantiated CrewAI agents for Step 4.")
-
-        # Verify all agents have an LLM assigned
-        agent_list = [self.cpp_analyst_agent, self.godot_analyst_agent, self.strategist_agent, self.decomposer_agent, self.formatter_agent]
-        for agent in agent_list:
-             if not agent.llm:
-                  logger.error(f"Agent '{agent.role}' in Step4Executor ended up with no assigned LLM. Check LLM configuration and instantiation.")
-                  raise ValueError(f"Agent '{agent.role}' missing LLM instance.")
-             else:
-                  logger.debug(f"Agent '{agent.role}' successfully assigned LLM: {type(agent.llm)}")
-
-
-    def _get_llm_instance_by_role(self, role: str, fallback_config: Optional[Dict] = None) -> Optional[Any]:
-         """
-         Helper to get and instantiate an LLM object for a specific role,
-         potentially falling back to another role's config.
-         Returns an instantiated LLM object or None.
-         """
-         llm_config = self._get_llm_config(role) # Fetches config dict from Orchestrator's map
-         if not llm_config and fallback_config:
-             logger.warning(f"LLM config for role '{role}' not found. Attempting fallback.")
-             llm_config = fallback_config # Use the fallback config dict
-         elif not llm_config and not fallback_config:
-              logger.warning(f"LLM config for role '{role}' not found and no fallback provided. Cannot instantiate LLM.")
-              return None
-
-         if not llm_config or not isinstance(llm_config, dict):
-              logger.error(f"Invalid or missing LLM config dictionary for role '{role}' (after fallback). Type: {type(llm_config)}")
-              return None
-
-         # Now, instantiate based on the final llm_config dictionary
-         try:
-             model_identifier = llm_config.get("model", "[Unknown Model]")
-             logger.debug(f"Attempting to instantiate LLM for role '{role}' using model '{model_identifier}' with config: {llm_config}")
-
-             # Explicitly check for Gemini model to use the custom class
-             if model_identifier.startswith(("gemini/", "google/")):
-                 from src.llms.google_genai_llm import GoogleGenAI_LLM # Local import
-                 # Ensure necessary params are present, add defaults if needed
-                 llm_config_copy = llm_config.copy() # Avoid modifying the original dict
-                 llm_config_copy.setdefault('timeout', config.GEMINI_TIMEOUT)
-                 llm_instance = GoogleGenAI_LLM(**llm_config_copy)
-                 logger.info(f"Successfully instantiated GoogleGenAI_LLM for role '{role}': {model_identifier}")
-             else:
-                 # Use default CrewAI LLM for other models (e.g., OpenAI configured via env vars)
-                 # CrewAI's default LLM loader might handle API keys from environment variables.
-                 from crewai import LLM as CrewAI_LLM # Local import
-                 # Pass only the necessary args expected by CrewAI_LLM if needed,
-                 # or let it use its defaults / environment variables.
-                 # For simplicity, assume CrewAI_LLM handles config dict well or uses env vars.
-                 llm_instance = CrewAI_LLM(**llm_config)
-                 logger.info(f"Successfully instantiated default crewai.LLM for role '{role}': {model_identifier}")
-
-             return llm_instance # Return the instantiated object
-
-         except ImportError as ie:
-              logger.error(f"Import error during LLM instantiation for role '{role}': {ie}. Check dependencies.")
-              return None
-         except TypeError as te:
-              logger.error(f"Type error during LLM instantiation for role '{role}': {te}. Check config parameters for model '{model_identifier}'. Config: {llm_config}")
-              return None
-         except Exception as e:
-             logger.error(f"Unexpected error during LLM instantiation for role '{role}' with model '{model_identifier}': {e}", exc_info=True)
-             return None
-
+        logger.info("Step4Executor initialized.")
 
     def execute(self, package_ids: Optional[List[str]] = None, force: bool = False, **kwargs) -> bool:
         """
@@ -164,6 +61,38 @@ class Step4Executor(StepExecutor):
         """
         feedback_override = kwargs.get('feedback_override', {})
         logger.info(f"--- Starting Step 4 Execution (Hierarchical): Define Mapping (Packages: {package_ids or 'All Eligible'}, Force={force}) ---")
+
+        # --- Instantiate LLMs and Agents using the new helper ---
+        cpp_analyst_llm = self._create_llm_instance('ANALYZER_MODEL')
+        godot_analyst_llm = self._create_llm_instance('ANALYZER_MODEL')
+        strategist_llm = self._create_llm_instance('DESIGNER_PLANNER_MODEL')
+        decomposer_llm = self._create_llm_instance('DESIGNER_PLANNER_MODEL')
+        formatter_llm = self._create_llm_instance('UTILITY_MODEL', response_schema_class=MappingOutput)
+        manager_llm = self._create_llm_instance('MANAGER_MODEL')
+
+        # Check if all required LLMs were instantiated successfully
+        required_llms = {
+            'Manager': manager_llm,
+            'CPP Analyst': cpp_analyst_llm,
+            'Godot Analyst': godot_analyst_llm,
+            'Strategist': strategist_llm,
+            'Decomposer': decomposer_llm,
+            'Formatter': formatter_llm
+        }
+        missing_llms = [name for name, llm in required_llms.items() if not llm]
+
+        if missing_llms:
+             logger.error(f"Missing critical LLM configurations for Step 4: {', '.join(missing_llms)}. Cannot proceed.")
+             self.state_manager.update_workflow_status('failed_step4', f"Missing LLM config for: {', '.join(missing_llms)}")
+             return False
+
+        cpp_analyst_agent = get_cpp_code_analyst_agent(cpp_analyst_llm)
+        godot_analyst_agent = get_godot_structure_analyst_agent(godot_analyst_llm)
+        strategist_agent = get_conversation_strategist_agent(strategist_llm)
+        decomposer_agent = get_task_decomposer_agent(decomposer_llm)
+        formatter_agent = get_json_output_fomratter_agent(formatter_llm)
+        logger.info("Instantiated LLMs and Agents for Step 4 execution.")
+
 
         # --- Identify Eligible Packages (Logic remains the same) ---
         packages_to_process_this_run = []
@@ -242,13 +171,7 @@ class Step4Executor(StepExecutor):
              return False
         godot_project_dir = Path(godot_project_dir_str).resolve()
 
-        # Ensure Manager LLM is available (checked in __init__, but double-check)
-        if not self.manager_llm:
-             logger.error("Manager LLM instance is missing. Cannot execute Step 4.")
-             self.state_manager.update_workflow_status('failed_step4', "Manager LLM instance missing.")
-             return False
-
-        # --- Load Global Packages Summary (packages.json content) ---
+        # --- Load Global Packages Summary (packages.json content) --- # Now loaded via StateManager
         # Use StateManager to load this artifact
         packages_json_content = self.state_manager.load_artifact("packages.json", expect_json=True)
         if packages_json_content is None:
@@ -326,13 +249,10 @@ class Step4Executor(StepExecutor):
                     for res_path in referenced_files_set:
                          if res_path.startswith("res://"):
                               relative_to_res = res_path[len("res://"):]
-                              # Ensure read_godot_file_content exists and handles errors
-                              if hasattr(self.context_manager, 'read_godot_file_content'):
-                                   content = self.context_manager.read_godot_file_content(str(godot_project_dir), relative_to_res)
-                                   if content is not None:
-                                        referenced_godot_content[res_path] = content
-                                   else: logger.warning(f"Failed to read content for referenced Godot file: {res_path}")
-                              else: logger.error("ContextManager missing read_godot_file_content method.")
+                              content = read_godot_file_content(str(godot_project_dir / relative_to_res))
+                              if content is not None:
+                                   referenced_godot_content[res_path] = content
+                              else: logger.warning(f"Failed to read content for referenced Godot file: {res_path}")
                          else: logger.warning(f"Referenced file path '{res_path}' does not start with 'res://'. Skipping.")
             elif loaded_existing_mapping:
                  logger.error(f"Loaded existing mapping file {original_json_artifact_filename} but it's not a dictionary. Ignoring.")
@@ -349,91 +269,175 @@ class Step4Executor(StepExecutor):
                      raise FileNotFoundError(f"Failed to load or parse structure JSON artifact: {structure_artifact_filename}")
                 structure_notes = structure_json_content.get("notes", "") # Extract notes
 
-                # --- Assemble Comprehensive Context ---
-                primary_files = pkg_info.get('files', [])
-                dependency_files = self.context_manager._get_dependencies_for_package(primary_files) if hasattr(self.context_manager, '_get_dependencies_for_package') else []
+                # --- Assemble Context using ContextManager methods ---
+                context_parts = []
 
-                context_kwargs = {
-                    "primary_relative_paths": primary_files,
-                    "dependency_relative_paths": dependency_files, # Request full content via ContextManager
-                    "work_package_id": pkg_id,
-                    "work_package_description": pkg_info.get('description', ''),
-                    "proposed_godot_structure_json": structure_json_content, # Pass raw structure dict
-                    "proposed_godot_structure_notes": structure_notes, # Pass notes separately
-                    "global_packages_summary": packages_json_content,
-                    "existing_godot_outputs": existing_godot_outputs,
-                    "existing_mapping_json": existing_mapping_json,
-                    "referenced_godot_content": referenced_godot_content # Pass dict of {path: content}
-                }
+                # 1. General Instructions
+                instr_context = self.context_manager.get_instruction_context()
+
+                # 2. Package Description
+                pkg_desc = pkg_info.get('description', 'N/A')
+                context_parts.append(f"**Current Package ({pkg_id}) Description:**\n{pkg_desc}")
+
+                # 3. Source Files List & Roles
+                source_files_list = self.context_manager.get_source_file_list(pkg_id)
+                if source_files_list:
+                    source_list_str = "\n".join([f"- `{f['file_path']}`: {f['role']}" for f in source_files_list])
+                    context_parts.append(f"**Source Files & Roles for {pkg_id}:**\n{source_list_str}")
+
+                # 4. Proposed Godot Structure (from Step 3 artifact)
+                structure_str = json.dumps(structure_json_content, indent=2)
+                context_parts.append(f"**Proposed Godot Structure for {pkg_id}:**\n```json\n{structure_str}\n```")
+                if structure_notes:
+                     context_parts.append(f"**Structure Notes:**\n{structure_notes}")
+
+                # 5. Source Code Content (respecting limits)
+                temp_context_so_far = "\n\n".join(context_parts)
+                tokens_so_far = count_tokens(temp_context_so_far) + count_tokens(instr_context)
+                max_source_tokens = int((global_config.MAX_CONTEXT_TOKENS - global_config.PROMPT_TOKEN_BUFFER) * 0.6) - tokens_so_far
+                if max_source_tokens > 0:
+                    source_code = self.context_manager.get_work_package_source_code_content(pkg_id, max_tokens=max_source_tokens)
+                    if source_code:
+                        context_parts.append(f"**Source Code for {pkg_id}:**\n{source_code}")
+                    else:
+                        logger.warning(f"Could not retrieve source code for {pkg_id} within token limits for Step 4.")
+                else:
+                    logger.warning(f"Not enough token budget remaining for source code of {pkg_id} in Step 4.")
+
+                # 6. Existing Mapping (if refining)
+                if existing_mapping_json:
+                     context_parts.append(f"**Existing Mapping Definition for {pkg_id} (for refinement):**\n```json\n{json.dumps(existing_mapping_json, indent=2)}\n```")
+                     if referenced_godot_content:
+                          ref_content_str = "\n\n".join([f"// File: {p}\n```gdscript\n{c}\n```" for p, c in referenced_godot_content.items()])
+                          context_parts.append(f"**Content of Referenced Godot Files:**\n{ref_content_str}")
+
+                # 7. Remapping Feedback (if provided)
                 if pkg_id in feedback_override:
-                     context_kwargs["previous_mapping_feedback"] = feedback_override[pkg_id]
-                     logger.info(f"Adding remapping feedback for package {pkg_id}.")
+                     context_parts.append(f"**Feedback on Previous Mapping Attempt:**\n{feedback_override[pkg_id]}")
 
-                step_name_log = "MAPPING_DEFINITION_REFINEMENT" if existing_mapping_json else "MAPPING_DEFINITION"
-                # ContextManager needs to handle fetching full content based on paths
-                context = self.context_manager.get_context_for_step(step_name_log, **context_kwargs)
-                if not context: raise ValueError("Failed to assemble context for Step 4.")
+                # 8. Globally Defined Godot Files (from overall mappings artifact)
+                overall_mappings = self.state_manager.load_artifact("mappings.json", expect_json=True)
+                all_defined_godot_files = []
+                if overall_mappings and isinstance(overall_mappings.get("all_output_files"), list):
+                     all_defined_godot_files = overall_mappings["all_output_files"]
+                     if existing_mapping_json: # Use existing mapping to filter
+                          current_pkg_files = set()
+                          for group in existing_mapping_json.get("task_groups", []):
+                               if isinstance(group, dict):
+                                    for task in group.get("tasks", []):
+                                         if isinstance(task, dict) and "output_godot_file" in task:
+                                              current_pkg_files.add(task["output_godot_file"])
+                          all_defined_godot_files = [f for f in all_defined_godot_files if f not in current_pkg_files]
+
+                if all_defined_godot_files:
+                     files_list_str = "\n".join([f"- `{f}`" for f in sorted(all_defined_godot_files)])
+                     context_parts.append(f"**Globally Defined Godot Files (excluding current package if refining):**\n{files_list_str}")
+
+
+                # Combine all context parts intended for the main prompt
+                context_str = "\n\n---\n\n".join(context_parts)
+                final_tokens = count_tokens(context_str) + count_tokens(instr_context)
+                logger.info(f"Assembled context for Step 4 - {pkg_id} ({final_tokens} tokens).")
+                if final_tokens >= (global_config.MAX_CONTEXT_TOKENS - global_config.PROMPT_TOKEN_BUFFER):
+                     logger.warning(f"Context for {pkg_id} in Step 4 might be near or exceeding token limits!")
+
+                if not context_str:
+                    raise ValueError(f"Failed to assemble any context for Step 4 - {pkg_id}.")
+
 
                 # --- Create Hierarchical Task ---
                 # Manager agent is implicit in hierarchical process
-                task = self.mapping_task_creator.create_task(
+                task = create_hierarchical_define_mapping_task(
                     manager_agent=None, # Manager is implicit
-                    context=context,
-                    package_id=pkg_id
+                    context=context_str,
+                    package_id=pkg_id,
+                    instructions=instr_context
                 )
 
                 # --- Create and run Hierarchical Crew ---
                 crew = Crew(
-                    agents=[ # List ALL worker agents for Step 4
-                        self.cpp_analyst_agent,
-                        self.godot_analyst_agent,
-                        self.strategist_agent,
-                        self.decomposer_agent,
-                        self.formatter_agent
+                    agents=[ # Pass agents instantiated in this method
+                        cpp_analyst_agent,
+                        godot_analyst_agent,
+                        strategist_agent,
+                        decomposer_agent,
+                        formatter_agent
                     ],
                     tasks=[task], # Single task for the manager
                     process=Process.hierarchical,
-                    llm=self.manager_llm,
-                    manager_llm=self.manager_llm, 
-                    planning_llm=self.manager_llm,
+                    manager_llm=manager_llm, # Pass manager LLM instance
+                    planning_llm=manager_llm, # Use manager for planning too
                     planning=True,
                     memory=True,
                     verbose=True,
                     task_callback=self._log_step4_task_completion # Add the callback
                 )
                 logger.info(f"Kicking off Hierarchical Crew for Step 4 (Package: {pkg_id}, Remapping: {is_remapping_run})...")
-                result = crew.kickoff() # Expecting final JSON string from FormatterAgent
+                result = crew.kickoff() # Expecting final JSON string from FormatterAgent or CrewOutput
                 logger.info(f"Step 4 Hierarchical Crew finished for package: {pkg_id}")
-                logger.debug(f"Crew Result Raw Output:\n{result}")
+                logger.debug(f"Crew Result Raw Output (Type: {type(result)}):\n{result}")
 
-                # --- Result Parsing & Validation ---
+                # --- Result Extraction and Parsing & Validation ---
                 mapping_data_dict = None
-                if isinstance(result, str):
-                    # Attempt to parse the final string output as JSON
-                    parsed_dict_attempt = parse_json_from_string(result)
-                    if parsed_dict_attempt:
-                        try:
-                            MappingOutput(**parsed_dict_attempt) # Validate structure
-                            logger.info("Final crew output conforms to MappingOutput model.")
-                            mapping_data_dict = parsed_dict_attempt
-                        except Exception as pydantic_err:
-                            logger.error(f"Final crew output does NOT conform to MappingOutput model: {pydantic_err}", exc_info=True)
-                            logger.debug(f"Invalid JSON received: {result}")
+                raw_output_for_parsing = None # Store the string to be parsed
+
+                if isinstance(result, CrewOutput):
+                    logger.info(f"Crew returned CrewOutput object for {pkg_id}. Extracting raw output.")
+                    if hasattr(result, 'raw') and isinstance(result.raw, str):
+                        raw_output_for_parsing = result.raw
+                        logger.debug(f"Extracted raw output from CrewOutput.raw")
+                    elif result.tasks_output and isinstance(result.tasks_output, list) and len(result.tasks_output) > 0:
+                         last_task_output = result.tasks_output[-1]
+                         if isinstance(last_task_output, TaskOutput) and isinstance(last_task_output.raw_output, str):
+                              raw_output_for_parsing = last_task_output.raw_output
+                              logger.warning("Extracted raw output from last task in CrewOutput.tasks_output (fallback).")
+                         else:
+                              logger.error("Could not extract raw string output from CrewOutput's last task.")
+                              raw_output_for_parsing = str(result)
                     else:
-                        logger.error(f"Failed to parse final crew output string as JSON for {pkg_id}. Raw output:\n---\n{result}\n---")
-                # Handle CrewOutput object if returned (less likely for final task?)
-                elif isinstance(result, dict): # If kickoff somehow returns a dict
+                         logger.error("CrewOutput object did not contain expected 'raw' string or usable 'tasks_output'.")
+                         raw_output_for_parsing = str(result)
+
+                elif isinstance(result, MappingOutput): # Check for Pydantic model
+                    logger.info(f"Crew returned validated Pydantic object for {pkg_id}.")
+                    mapping_data_dict = result.model_dump()
+                elif isinstance(result, str): # Direct string output
+                    logger.info(f"Crew returned a string directly for {pkg_id}.")
+                    raw_output_for_parsing = result
+                elif isinstance(result, dict): # Direct dict output
+                     logger.warning(f"Crew returned a dictionary directly for {pkg_id}. Attempting validation.")
                      try:
                           MappingOutput(**result)
                           logger.info("Crew output dict conforms to MappingOutput model.")
                           mapping_data_dict = result
                      except Exception as pydantic_err:
-                          logger.error(f"Crew output dict does NOT conform to MappingOutput model: {pydantic_err}", exc_info=True)
+                          logger.error(f"Crew output dict does NOT conform to MappingOutput model: {pydantic_err}")
+                          raw_output_for_parsing = json.dumps(result)
                 else:
                     logger.error(f"Unexpected final crew output type for {pkg_id}: {type(result)}")
+                    raw_output_for_parsing = str(result)
 
+                # --- Parse the extracted raw string if necessary ---
+                if raw_output_for_parsing is not None and mapping_data_dict is None:
+                    logger.info(f"Attempting to parse extracted/received raw output string as JSON.")
+                    # Use the imported parse_json_from_string utility
+                    parsed_dict_attempt = parse_json_from_string(raw_output_for_parsing)
+                    if parsed_dict_attempt and isinstance(parsed_dict_attempt, dict):
+                        try:
+                            MappingOutput(**parsed_dict_attempt) # Validate structure
+                            logger.info("Parsed JSON string conforms to MappingOutput model.")
+                            mapping_data_dict = parsed_dict_attempt
+                        except Exception as pydantic_err:
+                            logger.error(f"Parsed JSON string does NOT conform to MappingOutput model: {pydantic_err}", exc_info=True)
+                            logger.debug(f"Invalid JSON string received: {raw_output_for_parsing}")
+                    else:
+                        logger.error(f"Failed to parse string output as JSON dictionary for {pkg_id}.")
+                        logger.debug(f"String content that failed parsing: {raw_output_for_parsing}")
+
+                # --- Final Check ---
                 if not mapping_data_dict:
-                    raise ValueError(f"Step 4 Hierarchical Crew failed to produce valid mapping data for {pkg_id}.")
+                    logger.debug(f"Final raw output for {pkg_id} before failing: {raw_output_for_parsing}")
+                    raise ValueError(f"Step 4 Hierarchical Crew failed to produce valid mapping data for {pkg_id} after parsing.")
 
                 # --- Save JSON artifact using StateManager ---
                 save_json_ok = self.state_manager.save_artifact(json_artifact_filename, mapping_data_dict, is_json=True)
@@ -500,20 +504,56 @@ class Step4Executor(StepExecutor):
         return overall_success_this_run
 
     # --- Callback Method ---
-    def _log_step4_task_completion(self, task_output: TaskOutput):
+    def _log_step4_task_completion(self, task_output: Any): # Use Any for initial check
         """Logs information about each completed task within the Step 4 crew."""
         try:
-            agent_role = task_output.agent.role if task_output.agent else "Unknown Agent"
-            task_desc_snippet = task_output.task.description[:100] + "..." if task_output.task else "Unknown Task"
-            output_snippet = task_output.raw_output[:150].replace('\n', ' ') + "..." if task_output.raw_output else "No output"
+            # --- Safely Access Attributes ---
+            agent_role = "Unknown Agent"
+            task_desc_snippet = "Unknown Task"
+            output_snippet = "No output"
 
-            logger.info(f"[Step 4 Crew Callback] Task Completed:")
+            if isinstance(task_output, TaskOutput):
+                # Access agent safely
+                if hasattr(task_output, 'agent') and isinstance(task_output.agent, Agent):
+                    agent_role = task_output.agent.role
+                elif hasattr(task_output, 'agent'):
+                     logger.warning(f"[Step 4 Crew Callback] task_output.agent is not an Agent object (Type: {type(task_output.agent)}).")
+                     agent_role = f"Agent (Type: {type(task_output.agent).__name__})"
+                else:
+                     logger.warning("[Step 4 Crew Callback] task_output object missing 'agent' attribute.")
+
+                # Access task description safely
+                if hasattr(task_output, 'task') and task_output.task and hasattr(task_output.task, 'description'):
+                    task_desc_snippet = task_output.task.description[:100] + "..."
+                elif hasattr(task_output, 'description') and isinstance(task_output.description, str):
+                     task_desc_snippet = task_output.description[:100] + "..."
+                else:
+                     logger.warning("[Step 4 Crew Callback] Could not determine task description from task_output.")
+
+                # Access raw_output safely
+                if hasattr(task_output, 'raw_output') and isinstance(task_output.raw_output, str):
+                    output_snippet = task_output.raw_output[:150].replace('\n', ' ') + "..."
+                elif hasattr(task_output, 'output') and isinstance(task_output.output, str):
+                     output_snippet = task_output.output[:150].replace('\n', ' ') + "..."
+                else:
+                     logger.warning("[Step 4 Crew Callback] Could not determine raw output string from task_output.")
+
+            else:
+                logger.warning(f"[Step 4 Crew Callback] Received unexpected type for task_output: {type(task_output)}. Cannot extract details.")
+                try:
+                    output_snippet = str(task_output)[:150].replace('\n', ' ') + "..."
+                except Exception:
+                    output_snippet = "[Could not get string representation]"
+
+            # --- Log Information ---
+            logger.info(f"[Step 4 Crew Callback] Task Update:")
             logger.info(f"  - Agent: {agent_role}")
             logger.info(f"  - Task Desc (Start): {task_desc_snippet}")
             logger.info(f"  - Output (Start): {output_snippet}")
+
         except Exception as e:
             logger.error(f"[Step 4 Crew Callback] Error processing task output: {e}", exc_info=True)
             try:
-                 logger.debug(f"Raw task_output object: {task_output}")
+                 logger.debug(f"Raw task_output object during error: {task_output}")
             except Exception:
-                 logger.debug("Could not log raw task_output object.")
+                 logger.debug("Could not log raw task_output object during error.")

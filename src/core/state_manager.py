@@ -145,7 +145,8 @@ class StateManager:
                     'status': 'identified', # Initial status after identification
                     'artifacts': pkg_data.get('artifacts', {}), # Carry over any initial artifacts? Unlikely for step 2.
                     'remapping_attempts': pkg_data.get('remapping_attempts', 0),
-                    'last_error': pkg_data.get('last_error', None)
+                    'last_error': pkg_data.get('last_error', None),
+                    'total_tokens': pkg_data.get('total_tokens', 0) # Ensure total_tokens is preserved
                 }
             else:
                 logger.warning(f"Skipping invalid package data structure for ID '{pkg_id}' during set_packages.")
@@ -202,11 +203,21 @@ class StateManager:
                     logger.error(f"Invalid content type for artifact '{artifact_filename}'. Expected str, dict, or list, got {type(content)}.")
                     return False
             return True
-        except (IOError, TypeError, json.JSONDecodeError) as e:
-            logger.error(f"Failed to save artifact '{artifact_filename}' to {artifact_path}: {e}", exc_info=True)
+        except (IOError, TypeError) as e: # Separate IO/Type errors from the suspicious JSONDecodeError
+            logger.error(f"Failed to save artifact '{artifact_filename}' due to {type(e).__name__}: {e}", exc_info=True)
+            return False
+        except json.JSONDecodeError as e: # Catch JSONDecodeError separately
+            # This is highly unusual during save. Log carefully.
+            logger.error(f"Caught unexpected JSONDecodeError during save operation for '{artifact_filename}'. This might indicate a deeper issue.")
+            # Log the type and args if possible, before logging the full exception
+            try:
+                 logger.error(f"Exception type: {type(e)}, Args: {e.args}")
+            except Exception as log_err:
+                 logger.error(f"Could not log exception details: {log_err}")
+            logger.error(f"Full exception info:", exc_info=True) # Log full traceback
             return False
         except Exception as e:
-            logger.error(f"Unexpected error saving artifact '{artifact_filename}': {e}", exc_info=True)
+            logger.error(f"Unexpected error saving artifact '{artifact_filename}' of type {type(e).__name__}: {e}", exc_info=True)
             return False
 
     def load_artifact(self, artifact_filename: str, expect_json: bool = True) -> Optional[Union[str, Dict, List]]:

@@ -21,16 +21,17 @@ def get_structure_designer_agent(llm_instance: BaseLLM) -> Agent:
             f"Base the design on the C++ code analysis and global project context analysis provided. "
             f"Adhere strictly to SOLID principles and Godot best practices ({config.TARGET_LANGUAGE}). "
             f"Consider existing structure definitions for refinement if provided. "
-            f"Output the designed structure components (lists of scenes, scripts, resources, etc.) and descriptive notes."
+            f"Output the designed structure components (lists of scenes, scripts, resources, etc.) and descriptive notes. "
+            f"Fokus on the current work package and its context. Don't list scripts or scenes that are not core part of this work packages. "
         ),
         backstory=(
             "You are an expert Godot Engine architect specializing in migrating C++ projects. "
             "You translate C++ functionality and structure analysis into well-organized, idiomatic Godot projects. "
             "You focus on creating maintainable, scalable structures using scenes, nodes, scripts, and resources effectively, "
-            "while respecting existing project conventions identified in the global context analysis."
+            "while respecting existing project conventions identified in the global context analysis."            
         ),
         llm=llm_instance,
-        verbose=True,
+        verbose=False,
         allow_delegation=False,
         tools=[] # Designs structure based on context.
     )

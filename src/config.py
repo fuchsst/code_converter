@@ -83,6 +83,7 @@ if EXCLUDE_FOLDERS:
 
 
 # --- Context & Token Management ---
+MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", 32*1024)) # Max tokens for the model's output
 # Max tokens allowed for the context assembled *before* adding the main prompt
 MAX_CONTEXT_TOKENS = int(os.getenv("MAX_CONTEXT_TOKENS", 700_000)) # Gemini 2.5 Pro has 1M, leave buffer
 # Buffer subtracted from MAX_CONTEXT_TOKENS to leave room for prompt/response overhead
@@ -92,20 +93,20 @@ CONTEXT_FILE_BUDGET_RATIO = float(os.getenv("CONTEXT_FILE_BUDGET_RATIO", 0.9)) #
 
 # --- Package Identification Settings (Step 2) ---
 # Max estimated tokens for a single package's content/interface (used for splitting large clusters)
-MAX_PACKAGE_SIZE_TOKENS = int(os.getenv("MAX_PACKAGE_SIZE_TOKENS", 80_000))
+MAX_PACKAGE_SIZE_TOKENS = int(os.getenv("MAX_PACKAGE_SIZE_TOKENS", 50_000))
 # Minimum number of files for a cluster to be considered a valid final package
-MIN_PACKAGE_SIZE_FILES = int(os.getenv("MIN_PACKAGE_SIZE_FILES", 5))
+MIN_PACKAGE_SIZE_FILES = int(os.getenv("MIN_PACKAGE_SIZE_FILES", 3))
 # Ratio of LLM's context window to use for description/evaluation calls
 LLM_DESC_MAX_TOKENS_RATIO = float(os.getenv("LLM_DESC_MAX_TOKENS_RATIO", 0.75))
 # Maximum number of iterations for the package merging loop
-MAX_MERGE_ITERATIONS = int(os.getenv("MAX_MERGE_ITERATIONS", 10))
+MAX_MERGE_ITERATIONS = int(os.getenv("MAX_MERGE_ITERATIONS", 100))
 # Minimum score (based on graph connectivity) for a merge candidate pair to be considered
 MERGE_SCORE_THRESHOLD = float(os.getenv("MERGE_SCORE_THRESHOLD", 0.7))
 
 # --- Generation Settings ---
-DEFAULT_TEMPERATURE = float(os.getenv("DEFAULT_TEMPERATURE", 0.8))
-DEFAULT_TOP_P = float(os.getenv("DEFAULT_TOP_P", 0.95)) # Example, adjust as needed
-DEFAULT_TOP_K = int(os.getenv("DEFAULT_TOP_K", 20)) # Example, adjust as needed
+DEFAULT_TEMPERATURE = float(os.getenv("DEFAULT_TEMPERATURE", 0.9))
+DEFAULT_TOP_P = float(os.getenv("DEFAULT_TOP_P", 0.98)) # Example, adjust as needed
+DEFAULT_TOP_K = int(os.getenv("DEFAULT_TOP_K", 10)) # Example, adjust as needed
 
 # --- Ensure output/generated directories exist ---
 # Input directories (CPP_PROJECT_DIR, GODOT_PROJECT_DIR, GODOT_DOCS_DIR) are expected to be provided.

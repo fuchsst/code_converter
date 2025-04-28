@@ -1,10 +1,27 @@
 # src/core/step_executor.py
+# src/core/step_executor.py
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Type
+
+# Local application imports
 from .state_manager import StateManager
 from .context_manager import ContextManager
 from .tool_interfaces import IFileWriter, IFileReplacer, IFileReader, ISyntaxValidator
 from src.logger_setup import get_logger
+import src.config as global_config # Import config for GEMINI_TIMEOUT
+
+# Import LLM classes needed for instantiation check/logic
+# Use try-except for robustness if imports might fail in some environments
+try:
+    # Import the new LiteLLM wrapper
+    from src.llms.litellm_gemini_llm import LiteLLMGeminiLLM
+except ImportError:
+    LiteLLMGeminiLLM = None # Define as None if import fails
+try:
+    from crewai import LLM as CrewAI_LLM
+except ImportError:
+    CrewAI_LLM = None # Define as None if import fails
+
 
 logger = get_logger(__name__)
 
@@ -107,102 +124,6 @@ class StepExecutor(ABC):
         # Return the config dictionary if found
         return llm_config
 
-    def _get_llm_instance_by_role(self, role: str, fallback_llm: Optional[Any] = None) -> Optional[Any]:
-        """
-        Helper to get and instantiate an LLM object for a specific role using its config,
-        potentially falling back to another role's instance if config is missing or instantiation fails.
-        Returns an instantiated LLM object or None.
-        """
-        llm_config = self._get_llm_config(role) # Fetches config dict using the method above
-
-        # Use fallback LLM *instance* if config is missing for the current role
-        if not llm_config:
-            logger.warning(f"LLM config for role '{role}' not found.")
-            if fallback_llm:
-                logger.warning(f"Using fallback LLM instance for role '{role}'. Type: {type(fallback_llm)}")
-                return fallback_llm # Return the already instantiated fallback LLM
-            else:
-                logger.error(f"No config for role '{role}' and no fallback LLM provided.")
-                return None
-
-        if not isinstance(llm_config, dict):
-             logger.error(f"Invalid LLM config dictionary type for role '{role}'. Expected dict, got {type(llm_config)}")
-             # Attempt fallback if config type is wrong
-             if fallback_llm:
-                 logger.warning(f"Using fallback LLM instance for role '{role}' due to invalid config type.")
-                 return fallback_llm
-             return None
-
-        # --- Configuration Validation ---
-        model_identifier = llm_config.get("model")
-        if not model_identifier:
-            logger.error(f"Model identifier ('model') missing in LLM config for role '{role}'. Config: {llm_config}")
-            if fallback_llm:
-                logger.warning(f"Using fallback LLM instance for role '{role}' due to missing model identifier in primary config.")
-                return fallback_llm
-            return None
-
-        # Add checks for other potentially critical parameters if needed by constructors
-        # e.g., if api_key is mandatory for a specific provider and not handled by env vars:
-        # if model_identifier.startswith("some_provider/") and not llm_config.get("api_key"):
-        #     logger.error(f"API key missing for role '{role}' using model '{model_identifier}'.")
-        #     # Handle fallback or return None
-
-        # --- Instantiation ---
-        try:
-            logger.debug(f"Attempting to instantiate LLM for role '{role}' using model '{model_identifier}' with config: {llm_config}")
-
-            # Import necessary classes locally to avoid potential top-level circular imports
-            from src.llms.google_genai_llm import GoogleGenAI_LLM
-            from crewai import LLM as CrewAI_LLM
-            import src.config as global_config # Import config for GEMINI_TIMEOUT
-
-            # Prepare arguments explicitly
-            common_args = {
-                "model": model_identifier,
-                "temperature": llm_config.get("temperature"),
-                "top_p": llm_config.get("top_p"),
-                "top_k": llm_config.get("top_k"),
-            }
-            # Filter out None values
-            common_args = {k: v for k, v in common_args.items() if v is not None}
-
-            if model_identifier.startswith(("gemini/", "google/")):
-                gemini_args = common_args.copy()
-                gemini_args['timeout'] = llm_config.get('timeout', global_config.GEMINI_TIMEOUT)
-                if llm_config.get('api_key'):
-                    gemini_args['api_key'] = llm_config['api_key']
-                # Add schema/mime_type if needed for specific roles (passed via llm_configs)
-                if llm_config.get('response_schema'):
-                    gemini_args['response_schema'] = llm_config['response_schema']
-                if llm_config.get('response_mime_type'):
-                    gemini_args['response_mime_type'] = llm_config['response_mime_type']
-
-                llm_instance = GoogleGenAI_LLM(**gemini_args)
-                logger.info(f"Successfully instantiated GoogleGenAI_LLM for role '{role}': {model_identifier}")
-            else:
-                # For default CrewAI LLM, pass only common args.
-                llm_instance = CrewAI_LLM(**common_args)
-                logger.info(f"Successfully instantiated default crewai.LLM for role '{role}': {model_identifier}")
-
-            return llm_instance # Return the instantiated object
-
-        except ImportError as ie:
-             logger.error(f"Import error during LLM instantiation for role '{role}': {ie}. Check dependencies.")
-        except TypeError as te:
-             logger.error(f"Type error during LLM instantiation for role '{role}': {te}. Check config parameters for model '{model_identifier}'. Config: {llm_config}", exc_info=True)
-             logger.debug(f"LLM Config causing TypeError for role '{role}': {llm_config}")
-        except Exception as e:
-            logger.error(f"Unexpected error during LLM instantiation for role '{role}' with model '{model_identifier}': {e}", exc_info=True)
-            logger.debug(f"LLM Config causing Exception for role '{role}': {llm_config}")
-
-        # If instantiation failed, attempt fallback
-        if fallback_llm:
-            logger.warning(f"LLM instantiation failed for role '{role}'. Using fallback instance.")
-            return fallback_llm
-
-        return None # Return None if instantiation fails and no fallback
-
     def _get_tool(self, tool_interface: Type) -> Optional[Any]:
         """Helper to get a tool instance based on its interface type."""
         tool_instance = self.tools.get(tool_interface)
@@ -214,3 +135,96 @@ class StepExecutor(ABC):
              logger.error(f"Found tool for '{tool_interface.__name__}' but it does not implement the interface.")
              return None
         return tool_instance
+
+    # --- LLM Instantiation Helper ---
+    def _get_llm_instance(self,
+                          llm_config: Optional[Dict],
+                          config_key_name: str,
+                          response_schema_class: Optional[Type] = None) -> Optional[Any]:
+         """
+         Helper to instantiate an LLM object given its configuration dictionary.
+         Optionally applies a Pydantic response schema for Gemini models.
+
+         Args:
+             llm_config (Optional[Dict]): The configuration dictionary for the LLM.
+             config_key_name (str): The name of the config key (e.g., 'MANAGER_MODEL') for logging.
+             response_schema_class (Optional[Type]): The Pydantic class to use for response schema validation (if applicable).
+
+         Returns:
+             Optional[Any]: An instantiated LLM object or None.
+         """
+         if not llm_config or not isinstance(llm_config, dict):
+              logger.error(f"Invalid or missing LLM config dictionary provided for '{config_key_name}'. Type: {type(llm_config)}")
+              return None
+
+         # Now, instantiate based on the provided llm_config dictionary
+         try:
+             model_identifier = llm_config.get("model", "[Unknown Model]")
+             logger.debug(f"Attempting to instantiate LLM for '{config_key_name}' using model '{model_identifier}' with config: {llm_config}")
+
+             # Prioritize LiteLLM wrapper for Gemini models if available
+             if LiteLLMGeminiLLM and model_identifier.startswith(("gemini/", "google/")):
+                 llm_config_copy = llm_config.copy()
+                 # Ensure standard litellm params are used if available in config
+                 llm_config_copy.setdefault('timeout', global_config.GEMINI_TIMEOUT) # LiteLLM uses 'timeout'
+                 llm_config_copy.setdefault('max_tokens', global_config.MAX_OUTPUT_TOKENS) # LiteLLM uses 'max_tokens'
+
+                 # Handle response schema for LiteLLM (usually via response_format)
+                 if response_schema_class:
+                     logger.info(f"Applying response schema '{response_schema_class.__name__}' via response_format for LiteLLM instance (config key '{config_key_name}').")
+                     # Standard way to request JSON output in LiteLLM/OpenAI spec
+                     llm_config_copy.setdefault('response_format', {"type": "json_object"})
+                     # Note: LiteLLM's Gemini integration might support more specific schema passing,
+                     # check LiteLLM docs if direct Pydantic schema injection is needed/supported.
+
+                 # Remove params not expected by LiteLLMGeminiLLM init if necessary
+                 # (e.g., 'maxOutputTokens' if only 'max_tokens' is used)
+                 llm_config_copy.pop('maxOutputTokens', None)
+                 llm_config_copy.pop('response_schema', None) # Handled by response_format
+
+                 llm_instance = LiteLLMGeminiLLM(**llm_config_copy)
+                 logger.info(f"Successfully instantiated LiteLLMGeminiLLM for '{config_key_name}': {model_identifier}")
+
+             # Fallback to default CrewAI LLM for non-Gemini models
+             elif CrewAI_LLM:
+                 logger.debug(f"Model '{model_identifier}' is not Gemini. Using default CrewAI LLM for '{config_key_name}'.")
+                 # Pass the config directly, assuming it's compatible with CrewAI's base LLM or other wrappers it might use
+                 llm_instance = CrewAI_LLM(**llm_config)
+                 logger.info(f"Successfully instantiated default crewai.LLM for '{config_key_name}': {model_identifier}")
+
+             else:
+                 logger.error(f"Could not instantiate LLM for '{config_key_name}'. No suitable LLM classes available (LiteLLMGeminiLLM, CrewAI_LLM).")
+                 return None
+
+             return llm_instance # Return the instantiated object
+
+         except ImportError as ie: # Should be caught by initial checks, but keep for safety
+              logger.error(f"Import error during LLM instantiation for '{config_key_name}': {ie}. Check dependencies.")
+              return None
+         except TypeError as te:
+              logger.error(f"Type error during LLM instantiation for '{config_key_name}': {te}. Check config parameters for model '{model_identifier}'. Config: {llm_config}")
+              return None
+         except Exception as e:
+             logger.error(f"Unexpected error during LLM instantiation for '{config_key_name}' with model '{model_identifier}': {e}", exc_info=True)
+             return None
+
+    def _create_llm_instance(self,
+                             llm_role: str,
+                             response_schema_class: Optional[Type] = None) -> Optional[Any]:
+        """
+        Utility function to get config and instantiate LLM in one step.
+
+        Args:
+            llm_role (str): The role name (key) for the LLM configuration.
+            response_schema_class (Optional[Type]): Pydantic class for response schema (if needed).
+
+        Returns:
+            Optional[Any]: An instantiated LLM object or None.
+        """
+        logger.debug(f"Creating LLM instance for role: '{llm_role}'...")
+        llm_config = self._get_llm_config(llm_role)
+        if not llm_config:
+            # Error already logged by _get_llm_config
+            return None
+        # Call the existing instantiation method with the fetched config
+        return self._get_llm_instance(llm_config, llm_role, response_schema_class)

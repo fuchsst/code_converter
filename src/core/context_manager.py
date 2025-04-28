@@ -8,16 +8,13 @@ from typing import TYPE_CHECKING # Import for type hinting StateManager
 from src.logger_setup import get_logger
 import src.config as config
 import tiktoken
-# Import formatting utils
-from src.utils.formatting_utils import (
-    format_structure_to_markdown,
-    format_packages_summary_to_markdown,
-    format_existing_files_to_markdown
-)
+import glob
 
 logger = get_logger(__name__)
 
 PACKAGES_JSON_FILENAME = "packages.json" # Define filename constant
+STRUCTURE_ARTIFACT_SUFFIX = "_structure.json"
+MAPPING_ARTIFACT_SUFFIX = "_mapping.json"
 
 
 # --- Tiktoken Initializer ---
@@ -163,606 +160,492 @@ if TYPE_CHECKING:
     from .state_manager import StateManager
 
 class ContextManager:
-    def __init__(self, include_graph_path: str, cpp_source_dir: str, analysis_output_dir: str, state_manager: 'StateManager'):
+    def __init__(self,
+                 cpp_source_dir: str,
+                 godot_project_dir: str,
+                 analysis_output_dir: str,
+                 instruction_dir: Optional[str],
+                 state_manager: 'StateManager'):
         """
         Initializes the ContextManager.
 
         Args:
-            include_graph_path (str): Path to the JSON file containing the include graph.
             cpp_source_dir (str): Path to the root of the C++ source code.
-            analysis_output_dir (str): Path to the directory for analysis output files (like packages.json).
+            godot_project_dir (str): Path to the root of the Godot project output.
+            analysis_output_dir (str): Path to the directory for analysis output files.
+            instruction_dir (Optional[str]): Path to the directory containing instruction files.
             state_manager (StateManager): Instance of the StateManager to access package states.
         """
-        self.include_graph_path = include_graph_path
-        self.cpp_source_dir = Path(cpp_source_dir).resolve() # Store as absolute Path
-        self.analysis_dir = Path(analysis_output_dir).resolve() # Store as absolute Path
-        self.packages_file_path = self.analysis_dir / PACKAGES_JSON_FILENAME
-        self.state_manager = state_manager # Store StateManager instance
+        self.cpp_source_dir = Path(cpp_source_dir).resolve()
+        self.godot_project_dir = Path(godot_project_dir).resolve()
+        self.analysis_dir = Path(analysis_output_dir).resolve()
+        self.instruction_dir = Path(instruction_dir).resolve() if instruction_dir else None
+        self.state_manager = state_manager
 
-        self.include_graph = self._load_include_graph()
-        # Packages data is now primarily managed by StateManager, but keep loading for initial state?
-        # Let's rely on StateManager for package data access.
-        # self.packages_data, self.package_processing_order = self._load_packages_data()
-        self.clang_index = None
-        self.compile_db = None
-
+        # Load include graph via StateManager artifact loading
+        self.include_graph = self.state_manager.load_artifact("dependencies.json", expect_json=True)
         if not self.include_graph:
-             logger.warning(f"Include graph at '{include_graph_path}' failed to load or is empty.")
+             logger.warning("Include graph (dependencies.json) failed to load via StateManager or is empty.")
         else:
-             # Updated log message
-            logger.info(f"Context Manager initialized. Loaded include graph ({len(self.include_graph)} entries). StateManager provided.")
+             logger.info(f"Context Manager initialized. Loaded include graph ({len(self.include_graph)} entries) via StateManager.")
 
-    def _load_include_graph(self):
-        """Loads the include graph JSON file."""
-        if not os.path.exists(self.include_graph_path):
-             logger.error(f"Include graph file not found: {self.include_graph_path}")
-             return {}
-        try:
-            with open(self.include_graph_path, 'r', encoding='utf-8') as f:
-                graph = json.load(f)
-            logger.info(f"Successfully loaded include graph from: {self.include_graph_path}")
-            # Basic validation: check if it's a dictionary
-            if not isinstance(graph, dict):
-                logger.error(f"Include graph file is not a valid JSON dictionary: {self.include_graph_path}")
-                return {}
-            return graph
-        except json.JSONDecodeError:
-            logger.error(f"Error decoding JSON from include graph file: {self.include_graph_path}")
-            return {}
-        except Exception as e:
-            logger.error(f"Failed to load include graph: {e}", exc_info=True)
-            return {}
+    # --- Context Retrieval Methods ---
 
-    def _load_packages_data(self) -> Tuple[Dict[str, Any], Optional[List[str]]]:
-        """
-        Loads the packages data and processing order from the JSON file.
-        Returns a tuple: (packages_dict, processing_order_list | None).
-        """
-        packages_dict = {}
-        processing_order = None
-        if not self.packages_file_path.exists():
-            logger.info(f"{self.packages_file_path} not found. Initializing empty package data and order.")
-            return packages_dict, processing_order # Return empty dict and None if file doesn't exist
-
-        try:
-            with open(self.packages_file_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            logger.info(f"Successfully loaded existing package data from {self.packages_file_path}")
-
-            # Validate overall structure
-            if not isinstance(data, dict):
-                logger.warning(f"Invalid structure in {self.packages_file_path}. Expected top-level dictionary. Initializing empty.")
-                return {}, None
-
-            # Load packages dictionary
-            if 'packages' in data and isinstance(data['packages'], dict):
-                 packages_dict = data['packages']
-                 logger.debug(f"Loaded {len(packages_dict)} packages.")
-            else:
-                 logger.warning(f"Missing or invalid 'packages' key in {self.packages_file_path}. Initializing empty packages.")
-                 packages_dict = {}
-
-            # Load processing order list (optional)
-            if 'processing_order' in data and isinstance(data['processing_order'], list):
-                 # Further validation: check if all items are strings
-                 if all(isinstance(item, str) for item in data['processing_order']):
-                      processing_order = data['processing_order']
-                      logger.debug(f"Loaded processing order with {len(processing_order)} packages.")
-                 else:
-                      logger.warning(f"Invalid items in 'processing_order' list in {self.packages_file_path}. Expected list of strings. Ignoring order.")
-                      processing_order = None # Reset if invalid items found
-            else:
-                 logger.debug(f"'processing_order' key not found or invalid in {self.packages_file_path}. No processing order loaded.")
-                 processing_order = None
-
-            return packages_dict, processing_order
-
-        except json.JSONDecodeError as e:
-            logger.error(f"Error decoding JSON from {self.packages_file_path}: {e}. Initializing empty.")
-            return {}, None
-        except Exception as e:
-            logger.error(f"Error loading {self.packages_file_path}: {e}. Initializing empty.", exc_info=True)
-            return {}, None
-
-    def save_packages_data(self, packages_data_to_save: Dict[str, Any], package_order: Optional[List[str]] = None):
-        """
-        Saves the provided packages data and optional processing order to the JSON file.
-        """
-        try:
-            self.analysis_dir.mkdir(parents=True, exist_ok=True)
-            # Create the top-level structure
-            output_data = {
-                "packages": packages_data_to_save,
-                "processing_order": package_order # Will be null in JSON if None
-            }
-            with open(self.packages_file_path, 'w', encoding='utf-8') as f:
-                json.dump(output_data, f, indent=4)
-            logger.debug(f"Saved package data ({len(packages_data_to_save)} packages) and order ({len(package_order) if package_order else 'None'}) to {self.packages_file_path}")
-            # Update internal state after successful save
-            self.packages_data = packages_data_to_save
-            self.package_processing_order = package_order
-        except Exception as e:
-            logger.error(f"Failed to save package data to {self.packages_file_path}: {e}", exc_info=True)
-
-    def get_package_order(self) -> Optional[List[str]]:
-        """Returns the loaded package processing order, if available."""
-        return self.package_processing_order
-
-    def get_all_package_summaries(self) -> Dict[str, Dict[str, Any]]:
-        """
-        Retrieves a summary (description, files) for all packages.
-        Reloads data from file to ensure freshness.
-        """
-        packages_dict, _ = self._load_packages_data() # Reload data
-        summaries = {}
-        for pkg_id, pkg_data in packages_dict.items():
-            files_with_roles = {}
-            file_roles_list = pkg_data.get("file_roles", [])
-            if isinstance(file_roles_list, list):
-                for role_info in file_roles_list:
-                    if isinstance(role_info, dict) and "file_path" in role_info and "role" in role_info:
-                        files_with_roles[role_info["file_path"]] = role_info["role"]
-                    else:
-                        logger.warning(f"Invalid file_role format in package {pkg_id}: {role_info}")
-            else:
-                 logger.warning(f"Missing or invalid 'file_roles' list in package {pkg_id}. Files summary will not contain roles.")
-
-
-            summaries[pkg_id] = {
-                "description": pkg_data.get("description", "N/A"),
-                "files": files_with_roles # Use the dictionary with roles
-            }
-        logger.debug(f"Retrieved summaries with file roles for {len(summaries)} packages.")
-        return summaries
-
-    def get_existing_structure(self, package_id: str) -> Optional[Dict[str, Any]]:
-        """
-        Loads the existing Godot structure JSON for a specific package, if it exists.
-        """
-        structure_filename = f"package_{package_id}_structure.json"
-        structure_path = self.analysis_dir / structure_filename
-        if structure_path.exists():
+    def get_instruction_context(self) -> str:
+        """Loads and concatenates content from files in the instruction directory."""
+        instruction_context_str = ""
+        if self.instruction_dir and self.instruction_dir.is_dir():
+            logger.info(f"Reading instruction files from: {self.instruction_dir}")
+            instruction_parts = []
             try:
-                with open(structure_path, 'r', encoding='utf-8') as f:
-                    structure_data = json.load(f)
-                logger.debug(f"Loaded existing structure for package {package_id} from {structure_path}")
-                return structure_data
-            except (json.JSONDecodeError, IOError) as e:
-                logger.error(f"Failed to load or parse existing structure file {structure_path}: {e}", exc_info=True)
-                return None
+                for instruction_file in sorted(self.instruction_dir.iterdir()): # Sort for consistent order
+                    if instruction_file.is_file():
+                        # Use the utility function, don't remove comments/blanks from instructions
+                        content = read_file_content(str(instruction_file), remove_comments_blank_lines=False)
+                        if content:
+                            instruction_parts.append(f"--- Instruction File: {instruction_file.name} ---\n{content}")
+                        else:
+                            logger.warning(f"Could not read instruction file or it was empty: {instruction_file}")
+                if instruction_parts:
+                    instruction_context_str = "\n\n".join(instruction_parts)
+                    logger.info(f"Loaded instruction context ({len(instruction_context_str)} chars).")
+                else:
+                    logger.info("Instruction directory exists but contains no readable files.")
             except Exception as e:
-                 logger.error(f"Unexpected error loading existing structure file {structure_path}: {e}", exc_info=True)
-                 return None
+                logger.error(f"Error reading instruction files from {self.instruction_dir}: {e}", exc_info=True)
+        elif self.instruction_dir:
+            logger.warning(f"Instruction directory specified but not found or not a directory: {self.instruction_dir}")
         else:
-            logger.debug(f"No existing structure file found for package {package_id} at {structure_path}")
-            return None
+            logger.info("No INSTRUCTION_DIR configured. Skipping instruction context loading.")
+        return instruction_context_str
 
-    def get_all_existing_godot_files(self) -> Dict[str, List[str]]:
+    def get_source_file_list(self, package_id: str) -> List[Dict[str, str]]:
         """
-        Scans the analysis directory for all package_*.structure.json files
-        and compiles a dictionary mapping package IDs to their defined Godot scenes and scripts.
+        Retrieves the list of source files and their roles for a specific package.
+
+        Args:
+            package_id (str): The ID of the package.
+
+        Returns:
+            List[Dict[str, str]]: A list of dictionaries, each with 'file_path' and 'role'.
+                                  Returns empty list if package or roles not found.
         """
-        all_godot_files = {}
-        try:
-            if not self.analysis_dir.exists():
-                logger.warning(f"Analysis directory {self.analysis_dir} does not exist. Cannot scan for structure files.")
-                return {}
-
-            for item in self.analysis_dir.iterdir():
-                if item.is_file() and item.name.startswith("package_") and item.name.endswith("_structure.json"):
-                    match = re.match(r"package_(.+)_structure\.json", item.name)
-                    if match:
-                        pkg_id = match.group(1)
-                        try:
-                            with open(item, 'r', encoding='utf-8') as f:
-                                structure_data = json.load(f)
-
-                            package_files = []
-                            # Extract scene paths
-                            scenes = structure_data.get("scenes", [])
-                            if isinstance(scenes, list):
-                                for scene in scenes:
-                                    if isinstance(scene, dict) and "path" in scene:
-                                        package_files.append(scene["path"])
-
-                            # Extract script paths
-                            scripts = structure_data.get("scripts", [])
-                            if isinstance(scripts, list):
-                                for script in scripts:
-                                    if isinstance(script, dict) and "path" in script:
-                                        package_files.append(script["path"])
-
-                            if package_files:
-                                all_godot_files[pkg_id] = sorted(list(set(package_files))) # Store unique, sorted list
-                                logger.debug(f"Found {len(package_files)} Godot files for package {pkg_id} in {item.name}")
-
-                        except (json.JSONDecodeError, IOError) as e:
-                            logger.error(f"Failed to load or parse structure file {item}: {e}")
-                        except Exception as e:
-                            logger.error(f"Unexpected error processing structure file {item}: {e}", exc_info=True)
-        except Exception as e:
-            logger.error(f"Error scanning analysis directory {self.analysis_dir} for structure files: {e}", exc_info=True)
-
-        logger.info(f"Compiled existing Godot files from {len(all_godot_files)} packages based on structure definitions.")
-        return all_godot_files
-
-    def get_globally_defined_godot_files_from_state(self) -> List[str]:
-        """
-        Retrieves a unique list of all Godot file paths defined in the 'defined_godot_files'
-        artifact for packages that have successfully completed Step 3 or later.
-        """
-        if not self.state_manager:
-            logger.error("StateManager not available in ContextManager. Cannot retrieve defined files from state.")
+        pkg_info = self.state_manager.get_package_info(package_id)
+        if not pkg_info:
+            logger.warning(f"Package info not found for '{package_id}' in StateManager.")
             return []
 
-        all_defined_files = set()
-        packages = self.state_manager.get_all_packages()
-        # Define statuses indicating structure has been defined or processed further
-        valid_statuses = ['structure_defined', 'mapping_defined', 'needs_remapping',
-                          'running_mapping', 'running_remapping', 'failed_mapping', 'failed_remapping',
-                          'running_processing', 'processing_report_generated', 'failed_processing',
-                          'processed']
+        file_roles_list = pkg_info.get("file_roles", [])
+        result_list = []
+        if isinstance(file_roles_list, list):
+            for role_info in file_roles_list:
+                if isinstance(role_info, dict) and "file_path" in role_info and "role" in role_info:
+                    result_list.append({
+                        "file_path": role_info["file_path"],
+                        "role": role_info["role"]
+                    })
+                else:
+                    logger.warning(f"Invalid file_role format in package {package_id}: {role_info}")
+        else:
+            logger.warning(f"Missing or invalid 'file_roles' list in package {package_id}.")
 
-        for pkg_id, pkg_data in packages.items():
-            if pkg_data.get('status') in valid_statuses:
-                defined_list = pkg_data.get('artifacts', {}).get('defined_godot_files')
-                if isinstance(defined_list, list):
-                    all_defined_files.update(defined_list)
-                # else: logger.debug(f"Package {pkg_id} has status {pkg_data.get('status')} but no 'defined_godot_files' artifact.")
+        logger.debug(f"Retrieved {len(result_list)} source files/roles for package '{package_id}'.")
+        return result_list
 
-        logger.info(f"Retrieved {len(all_defined_files)} unique defined Godot file paths from state artifacts.")
-        return sorted(list(all_defined_files))
-
-    def get_existing_godot_output_files(self, godot_project_dir: str) -> List[str]:
+    def get_target_file_list(self, package_id: str) -> List[Dict[str, Any]]:
         """
-        Scans the actual Godot project output directory for existing relevant files.
+        Retrieves the list of target Godot files defined for a package,
+        including their purpose and existence status.
 
         Args:
-            godot_project_dir (str): The absolute path to the Godot project directory.
+            package_id (str): The ID of the package.
 
         Returns:
-            List[str]: A list of relative paths (from godot_project_dir) of existing
-                       .gd, .tscn, .tres, .shader, .py files.
+            List[Dict[str, Any]]: List of dicts with 'path', 'purpose', 'exists' (bool).
+                                  Returns empty list if structure artifact not found/parsable.
         """
-        godot_dir = Path(godot_project_dir).resolve()
-        if not godot_dir.is_dir():
-            logger.warning(f"Godot project directory not found or not a directory: {godot_dir}. Cannot scan for existing output files.")
+        structure_artifact_name = f"package_{package_id}{STRUCTURE_ARTIFACT_SUFFIX}"
+        structure_data = self.state_manager.load_artifact(structure_artifact_name, expect_json=True)
+
+        if not structure_data or not isinstance(structure_data, dict):
+            logger.warning(f"Could not load or parse structure artifact '{structure_artifact_name}' for package '{package_id}'.")
             return []
 
-        logger.info(f"Scanning Godot project directory for existing output files: {godot_dir}")
-        existing_files = []
-        relevant_extensions = {".gd", ".tscn", ".tres", ".shader", ".py"} # Add other relevant types if needed
+        target_files = []
+        defined_files_details = []
 
-        try:
-            for item in godot_dir.rglob('*'): # Recursive glob
-                if item.is_file() and item.suffix.lower() in relevant_extensions:
-                    # Calculate relative path from the godot_project_dir
-                    try:
-                        relative_path = item.relative_to(godot_dir).as_posix() # Use POSIX paths for consistency
-                        # Prepend 'res://' to match Godot's convention
-                        res_path = f"res://{relative_path}"
-                        existing_files.append(res_path)
-                    except ValueError:
-                        # Should not happen if rglob starts within godot_dir, but handle defensively
-                        logger.warning(f"Could not determine relative path for {item} within {godot_dir}")
+        # Extract details from structure data
+        for key in ["scenes", "scripts", "resources", "migration_scripts"]:
+            items = structure_data.get(key, [])
+            if isinstance(items, list):
+                for item in items:
+                    if isinstance(item, dict) and "path" in item and "purpose" in item:
+                        defined_files_details.append({
+                            "path": item["path"],
+                            "purpose": item["purpose"]
+                        })
+                    # else: logger.warning(f"Invalid item format in '{key}' list for package {package_id}: {item}")
 
-        except Exception as e:
-            logger.error(f"Error scanning Godot project directory {godot_dir}: {e}", exc_info=True)
+        # Check existence in Godot project dir
+        for file_detail in defined_files_details:
+            godot_path_str = file_detail["path"]
+            purpose = file_detail["purpose"]
+            exists = False
+            if godot_path_str.startswith("res://"):
+                relative_path = godot_path_str[len("res://"):]
+                absolute_path = self.godot_project_dir / relative_path
+                exists = absolute_path.is_file()
+            else:
+                logger.warning(f"Target file path '{godot_path_str}' in structure for package '{package_id}' does not start with 'res://'. Cannot check existence.")
 
-        logger.info(f"Found {len(existing_files)} existing Godot output files in {godot_dir}.")
-        return sorted(existing_files)
+            target_files.append({
+                "path": godot_path_str,
+                "purpose": purpose,
+                "exists": exists
+            })
 
-    def read_godot_file_content(self, godot_project_dir: str, file_path: str) -> str | None:
+        logger.debug(f"Retrieved {len(target_files)} target file details for package '{package_id}'.")
+        return target_files
+
+    def get_work_package_source_code_content(self, package_id: str, max_tokens: Optional[int] = None) -> str:
         """
-        Reads content from a Godot file (.gd, .tscn, .tres), handling encoding issues,
-        and removing comments (#) and blank lines. Delegates to the utility function.
+        Retrieves and formats C++ source code content for a given package ID,
+        respecting token limits.
 
         Args:
-            file_path (str): Absolute or relative path to the Godot file.
-                             If relative, it's assumed relative to the CWD or needs context.
-                             It's safer to pass absolute paths or paths relative to godot_project_dir.
+            package_id (str): The ID of the package.
+            max_tokens (Optional[int]): Maximum tokens for the combined content. Defaults to config.
 
         Returns:
-            str | None: The cleaned content or None if reading fails.
+            str: A formatted string containing the source code, or empty string if no files/content.
         """
-        # Note: This method currently just wraps the utility function.
-        return read_godot_file_content(os.path.join(godot_project_dir, file_path))
+        if max_tokens is None:
+            max_tokens = config.MAX_CONTEXT_TOKENS - config.PROMPT_TOKEN_BUFFER # Default limit
+            logger.debug(f"Using default max_tokens for source code content: {max_tokens}")
 
+        pkg_info = self.state_manager.get_package_info(package_id)
+        if not pkg_info:
+            logger.warning(f"Package info not found for '{package_id}' in StateManager.")
+            return ""
 
-    def _get_contextual_content(self,
-                                relative_paths: list[str],
-                                max_tokens: int):
+        source_files = pkg_info.get("files", []) # Get the list of relative paths
+        if not isinstance(source_files, list) or not source_files:
+            logger.warning(f"No source files found for package '{package_id}'.")
+            return ""
+
+        logger.info(f"Retrieving source code content for package '{package_id}' ({len(source_files)} files, max_tokens={max_tokens}).")
+
+        # Use _get_contextual_content to read files respecting token limits
+        # Need to re-implement or adapt _get_contextual_content logic here or call a helper
+        content_map = self._get_cpp_content_for_paths(relative_paths=source_files, max_tokens=max_tokens)
+
+        # Format the content map into a single string
+        formatted_parts = []
+        for file_path, content in content_map.items():
+            lang_hint = os.path.splitext(file_path)[1].lstrip('.') or "cpp"
+            formatted_parts.append(f"// File: {file_path}\n```{lang_hint}\n{content}\n```")
+
+        final_content = "\n\n".join(formatted_parts)
+        final_tokens = count_tokens(final_content)
+        logger.info(f"Assembled source code content for package '{package_id}' ({len(content_map)} files included, {final_tokens} tokens).")
+        return final_content
+
+    def get_work_package_target_code_content(self, package_id: str, max_tokens: Optional[int] = None) -> str:
         """
-        Retrieves full content for specified files, respecting token limits.
+        Retrieves and formats EXISTING Godot code/scene/resource content
+        defined for a given package ID, respecting token limits.
+
         Args:
-            relative_paths (list[str]): Files needing full content.
-            max_tokens (int): The approximate maximum tokens allowed for the combined content.
+            package_id (str): The ID of the package.
+            max_tokens (Optional[int]): Maximum tokens for the combined content. Defaults to config.
 
         Returns:
-            dict: A dictionary mapping relative paths to their full content.
-                  Stops adding files if max_tokens is exceeded.
+            str: A formatted string containing the existing target code, or empty string.
         """
+        if max_tokens is None:
+            max_tokens = config.MAX_CONTEXT_TOKENS - config.PROMPT_TOKEN_BUFFER # Default limit
+            logger.debug(f"Using default max_tokens for target code content: {max_tokens}")
+
+        target_files_details = self.get_target_file_list(package_id)
+        if not target_files_details:
+            logger.info(f"No target files defined or structure artifact missing for package '{package_id}'.")
+            return ""
+
+        existing_target_files = [f["path"] for f in target_files_details if f["exists"]]
+        if not existing_target_files:
+            logger.info(f"No existing target files found for package '{package_id}'.")
+            return ""
+
+        logger.info(f"Retrieving existing target code content for package '{package_id}' ({len(existing_target_files)} files, max_tokens={max_tokens}).")
+
         content_map = {}
         current_tokens = 0
-        processed_paths = set() # Avoid processing the same file twice
+        processed_paths = set()
 
-        logger.debug(f"Retrieving contextual content for {len(relative_paths)} files. Max tokens: {max_tokens}")
+        for res_path in existing_target_files:
+            if res_path in processed_paths: continue
 
-        # Process all files, attempting to add full content within token limits
-        for rel_path in relative_paths:
-            # Paths are assumed to be normalized with '/' already
-            if rel_path in processed_paths: continue
-
-            # Construct absolute path using pathlib
-            abs_path_obj = self.cpp_source_dir / rel_path
-            abs_path_str = str(abs_path_obj) # Convert to string for functions expecting strings
-
-            if not abs_path_obj.exists():
-                logger.warning(f"File not found: {abs_path_str}")
-                processed_paths.add(rel_path) # Mark as processed even if not found
+            if not res_path.startswith("res://"):
+                logger.warning(f"Target file path '{res_path}' does not start with 'res://'. Skipping.")
+                processed_paths.add(res_path)
                 continue
 
+            relative_path = res_path[len("res://"):]
+            absolute_path = self.godot_project_dir / relative_path
+
             try:
-                # Always read full content now
-                file_content = read_file_content(abs_path_str)
+                # Use the Godot-specific reader utility
+                file_content = read_godot_file_content(str(absolute_path))
                 if file_content is None:
-                    processed_paths.add(rel_path) # Mark as processed even if content is None/error
+                    processed_paths.add(res_path)
                     continue
 
                 content_tokens = count_tokens(file_content)
                 buffer = 50 # Small buffer per item
 
                 if check_token_limit(current_tokens + content_tokens + buffer, max_tokens):
-                    # Use rel_path as the key consistently
+                    content_map[res_path] = file_content # Use res:// path as key
+                    current_tokens += content_tokens
+                    processed_paths.add(res_path)
+                    logger.debug(f"Added EXISTING target content from {res_path} ({content_tokens} tokens). Total: {current_tokens}")
+                else:
+                    logger.warning(f"Skipping EXISTING target content from {res_path} due to token limit.")
+                    processed_paths.add(res_path)
+                    break # Stop if limit reached
+
+            except Exception as e:
+                logger.error(f"Error processing existing target file {absolute_path}: {e}", exc_info=True)
+                processed_paths.add(res_path)
+
+        # Format the content map into a single string
+        formatted_parts = []
+        for file_path, content in content_map.items():
+            lang_hint = os.path.splitext(file_path)[1].lstrip('.') or "text"
+            formatted_parts.append(f"// Existing File: {file_path}\n```{lang_hint}\n{content}\n```")
+
+        final_content = "\n\n".join(formatted_parts)
+        final_tokens = count_tokens(final_content)
+        logger.info(f"Assembled existing target code content for package '{package_id}' ({len(content_map)} files included, {final_tokens} tokens).")
+        return final_content
+
+    # --- Internal Helper Methods ---
+
+    def _get_cpp_content_for_paths(self, relative_paths: list[str], max_tokens: int) -> Dict[str, str]:
+        """Internal helper to retrieve C++ file content, respecting token limits."""
+        content_map = {}
+        current_tokens = 0
+        processed_paths = set()
+        logger.debug(f"Internal: Retrieving C++ content for {len(relative_paths)} paths. Max tokens: {max_tokens}")
+
+        for rel_path in relative_paths:
+            if rel_path in processed_paths: continue
+            abs_path_obj = self.cpp_source_dir / rel_path
+            abs_path_str = str(abs_path_obj)
+
+            if not abs_path_obj.exists():
+                logger.warning(f"File not found: {abs_path_str}")
+                processed_paths.add(rel_path)
+                continue
+
+            try:
+                file_content = read_file_content(abs_path_str) # Uses the utility with comment removal etc.
+                if file_content is None:
+                    processed_paths.add(rel_path)
+                    continue
+
+                content_tokens = count_tokens(file_content)
+                buffer = 50
+
+                if check_token_limit(current_tokens + content_tokens + buffer, max_tokens):
                     content_map[rel_path] = file_content
                     current_tokens += content_tokens
                     processed_paths.add(rel_path)
-                    logger.debug(f"Added FULL content from {rel_path} ({content_tokens} tokens). Total: {current_tokens}")
+                    # logger.debug(f"Internal: Added C++ content from {rel_path} ({content_tokens} tokens). Total: {current_tokens}")
                 else:
-                    logger.warning(f"Skipping FULL content from {rel_path} due to token limit ({current_tokens}+{content_tokens}+{buffer} > {max_tokens}).")
-                    # Mark as processed even if skipped due to limit
+                    logger.warning(f"Internal: Skipping C++ content from {rel_path} due to token limit.")
                     processed_paths.add(rel_path)
-                    # Optimization: If we exceed the limit, stop processing further files for this context assembly.
-                    # This avoids unnecessary reading/tokenizing for large packages.
-                    logger.info(f"Token limit reached ({max_tokens}). Stopping further file processing for this context assembly.")
-                    break # Stop iterating through relative_paths
-
+                    break
             except Exception as e:
-                logger.error(f"Error processing file {abs_path_str}: {e}", exc_info=True)
-                processed_paths.add(rel_path) # Mark as processed even on error
+                logger.error(f"Internal: Error processing C++ file {abs_path_str}: {e}", exc_info=True)
+                processed_paths.add(rel_path)
 
-        logger.info(f"Finished retrieving contextual content. {len(content_map)} files added. Total tokens: {current_tokens}")
+        logger.debug(f"Internal: Finished retrieving C++ content. {len(content_map)} files added. Total tokens: {current_tokens}")
         return content_map
 
-    def _assemble_context_block(self, file_content_map: dict, other_context: dict, max_total_tokens: int) -> str:
-        """
-        Assembles context from file contents and other provided context items
-        into a single string using Markdown formatting, respecting token limits.
-        Prioritizes 'other_context' first, then file contents.
 
-        Args:
-            file_content_map (dict): Dictionary mapping relative file paths to their full content.
-            other_context (dict): Dictionary of other context items (e.g., task descriptions, JSON data).
-            max_total_tokens (int): The overall token limit for the final context string.
+    # --- Deprecated / To Be Removed Methods ---
 
-        Returns:
-            str: The assembled context string formatted with Markdown.
-        """
-        final_context_parts = []
-        current_total_tokens = 0
-        # Estimate Markdown formatting tokens (```cpp\n ... \n```\n\n) per block
-        markdown_overhead_per_block = count_tokens("\n\n```cpp\n\n```\n\n") + 20 # Extra buffer
-
-        logger.debug(f"Assembling context block with max_total_tokens: {max_total_tokens}")
-
-        # 1. Add 'instruction_context' first if provided
-        instruction_context = other_context.pop('instruction_context', None) # Extract and remove from dict
-        if instruction_context and isinstance(instruction_context, str):
-            # Format instructions clearly
-            formatted_instructions = f"**Instructions:**\n```text\n{instruction_context}\n```"
-            component_tokens = count_tokens(formatted_instructions)
-            separator_tokens = count_tokens("\n\n")
-
-            if check_token_limit(current_total_tokens + component_tokens + separator_tokens, max_total_tokens):
-                final_context_parts.append(formatted_instructions)
-                current_total_tokens += component_tokens + separator_tokens
-                logger.debug(f"Added instruction context ({component_tokens} tokens). Total tokens: {current_total_tokens}")
-            else:
-                logger.warning("Skipping instruction context due to token limit.")
-        elif instruction_context:
-             logger.warning(f"instruction_context provided but was not a string (type: {type(instruction_context)}). Skipping.")
+    # Note: _load_packages_data is now effectively handled by StateManager loading artifacts.
+    # Keeping the first definition commented out for reference during transition if needed.
+    # def _load_packages_data(self) -> Tuple[Dict[str, Any], Optional[List[str]]]:
+    #     """
+    #     Loads the packages data and processing order from the JSON file.
+    #     Returns a tuple: (packages_dict, processing_order_list | None).
+    #     """
+    #     if not os.path.exists(self.include_graph_path):
+    #          logger.error(f"Include graph file not found: {self.include_graph_path}")
+    #          return {}
+    #     try:
+    #         with open(self.include_graph_path, 'r', encoding='utf-8') as f:
+    #             graph = json.load(f)
+    #         logger.info(f"Successfully loaded include graph from: {self.include_graph_path}")
+    #         # Basic validation: check if it's a dictionary
+    #         if not isinstance(graph, dict):
+    #             logger.error(f"Include graph file is not a valid JSON dictionary: {self.include_graph_path}")
+    #             return {}
+    #         return graph
+    #     except json.JSONDecodeError:
+    #         logger.error(f"Error decoding JSON from include graph file: {self.include_graph_path}")
+    #         return {}
+    #     except Exception as e:
+    #         logger.error(f"Failed to load include graph: {e}", exc_info=True)
+    #         return {}
 
 
-        # 2. Add remaining 'other_context' items (e.g., task descriptions, JSON data)
-        for key, content in other_context.items():
-            # Skip if key was already handled or content is empty
-            if not content or key == 'instruction_context':
-                logger.debug(f"Skipping other context item: {key} (empty or already handled)")
-                continue
+    # Removing the second (duplicate/old) _load_packages_data method and save_packages_data
+    # def save_packages_data(...): # Now handled by StateManager saving artifacts
 
-            # Format based on content type (simple text vs. JSON vs. specific keys)
-            title = key.replace('_', ' ').title()
+    # def get_package_order(self) -> Optional[List[str]]: # Now handled by StateManager
+    #     """Returns the loaded package processing order, if available."""
+    #     return
 
-            # Handle specific keys with custom formatting using utility functions
-            if key == "proposed_godot_structure_md":
-                 # Already formatted by utility, just add title/wrapper if needed
-                 # The utility function already adds a title, so just use the content.
-                 formatted_content = f"**Proposed Godot Structure:**\n{str(content)}"
-            elif key == "global_packages_summary":
-                 # Use the dedicated formatter
-                 formatted_content = format_packages_summary_to_markdown(content)
-            elif key == "existing_godot_outputs":
-                 # Use the dedicated formatter, pass the title derived from the key
-                 formatted_content = format_existing_files_to_markdown(content, title=title)
-            elif isinstance(content, (dict, list)):
-                 # Default JSON formatting for other dicts/lists
-                 formatted_content = f"**{title} (JSON):**\n```json\n{json.dumps(content, indent=2)}\n```"
-            elif isinstance(content, str) and content.strip().startswith(('{', '[')): # Basic check for JSON string
-                 # Try to pretty-print if it looks like a JSON string
-                 try:
-                      parsed_json = json.loads(content)
-                      formatted_content = f"**{title} (JSON String):**\n```json\n{json.dumps(parsed_json, indent=2)}\n```"
-                 except json.JSONDecodeError:
-                      formatted_content = f"**{title}:**\n```text\n{content}\n```" # Treat as plain text block
-            else:
-                 formatted_content = f"**{title}:**\n{str(content)}" # Treat as simple text
+    # def get_all_package_summaries(self) -> Dict[str, Dict[str, Any]]: # Now handled by StateManager + Executor formatting
+    #     """
+    #     Retrieves a summary (description, files) for all packages.
+    #     Reloads data from file to ensure freshness.
+    #     """
+    #     # This logic is now redundant as StateManager holds the data
+    #     # and formatting should happen in the executor.
+    #     logger.warning("DEPRECATED: ContextManager.get_all_package_summaries called.")
+    #     return {} # Return empty dict as it's deprecated
 
-            component_tokens = count_tokens(formatted_content)
-            separator_tokens = count_tokens("\n\n") # Separator between context items
+    # def get_existing_structure(self, package_id: str) -> Optional[Dict[str, Any]]: # Now handled by StateManager loading artifact
+    #     """
+    #     Loads the existing Godot structure JSON for a specific package, if it exists.
+    #     """
+    #     logger.warning("DEPRECATED: ContextManager.get_existing_structure called.")
+    #     # Delegate to StateManager loading
+    #     structure_filename = f"package_{package_id}{STRUCTURE_ARTIFACT_SUFFIX}"
+    #     return self.state_manager.load_artifact(structure_filename, expect_json=True)
 
-            # Check limit before adding
-            if check_token_limit(current_total_tokens + component_tokens + separator_tokens, max_total_tokens):
-                final_context_parts.append(formatted_content)
-                current_total_tokens += component_tokens + separator_tokens
-                logger.debug(f"Added other context '{key}' ({component_tokens} tokens). Total tokens: {current_total_tokens}")
-            else:
-                logger.warning(f"Skipping other context '{key}' due to token limit.")
-                # Don't break; try adding files or smaller context items
+    # def get_all_existing_godot_files(self) -> Dict[str, List[str]]: # Now handled by StateManager loading artifacts
+    #     """
+    #     Scans the analysis directory for all package_*.structure.json files
+    #     and compiles a dictionary mapping package IDs to their defined Godot scenes and scripts.
+    #     """
+    #     logger.warning("DEPRECATED: ContextManager.get_all_existing_godot_files called.")
+    #     # This should be derived from StateManager data or artifacts
+    #     return {} # Return empty dict as it's deprecated
 
-        # 3. Add file contents using Markdown code blocks
-        for file_path, content in file_content_map.items():
-            if not content:
-                logger.debug(f"Skipping empty file content block: {file_path}")
-                continue
+    # def get_globally_defined_godot_files_from_state(self) -> List[str]: # Now handled by StateManager
+    #     """
+    #     Retrieves a unique list of all Godot file paths defined in the 'defined_godot_files'
+    #     artifact for packages that have successfully completed Step 3 or later.
+    #     """
+    #     logger.warning("DEPRECATED: ContextManager.get_globally_defined_godot_files_from_state called.")
+    #     # This logic should reside within StateManager or be assembled by the executor
+    #     return [] # Return empty list as it's deprecated
 
-            # Determine language hint for Markdown block
-            lang_hint = os.path.splitext(file_path)[1].lstrip('.')
-            if not lang_hint: lang_hint = "text" # Default if no extension
+    # def get_existing_godot_output_files(self, godot_project_dir: str) -> List[str]: # Logic moved to get_target_file_list check
+    #     """
+    #     Scans the actual Godot project output directory for existing relevant files.
+    #
+    #     Args:
+    #         godot_project_dir (str): The absolute path to the Godot project directory.
+    #
+    #     Returns:
+    #         List[str]: A list of relative paths (from godot_project_dir) of existing
+    #                    .gd, .tscn, .tres, .shader, .py files.
+    #     """
+    #     logger.warning("DEPRECATED: ContextManager.get_existing_godot_output_files called.")
+    #     # This logic is partially covered by get_target_file_list
+    #     return [] # Return empty list as it's deprecated
 
-            # Format as Markdown code block
-            block = f"**File:** `{file_path}`\n```{lang_hint}\n{content}\n```"
-            block_tokens = count_tokens(block) # Count tokens of the formatted block
+    # def read_godot_file_content(self, godot_project_dir: str, file_path: str) -> str | None: # Now a top-level utility
+    #     """
+    #     Reads content from a Godot file (.gd, .tscn, .tres), handling encoding issues,
+    #     and removing comments (#) and blank lines. Delegates to the utility function.
+    #
+    #     Args:
+    #         file_path (str): Absolute or relative path to the Godot file.
+    #                          If relative, it's assumed relative to the CWD or needs context.
+    #                          It's safer to pass absolute paths or paths relative to godot_project_dir.
+    #
+    #     Returns:
+    #         str | None: The cleaned content or None if reading fails.
+    #     """
+    #     logger.warning("DEPRECATED: ContextManager.read_godot_file_content called.")
+    #     # Use the top-level utility function directly
+    #     # Determine absolute path correctly if needed
+    #     abs_path = Path(file_path)
+    #     if not abs_path.is_absolute():
+    #          # Assuming file_path is relative to godot_project_dir if not absolute
+    #          abs_path = Path(godot_project_dir) / file_path
+    #     return read_godot_file_content(str(abs_path))
 
-            # Check if the formatted block fits within the remaining limit
-            if check_token_limit(current_total_tokens + block_tokens, max_total_tokens):
-                final_context_parts.append(block)
-                current_total_tokens += block_tokens + count_tokens("\n\n") # Add tokens for block and separator
-                logger.debug(f"Added file content block for '{file_path}' ({block_tokens} tokens). Total tokens now: {current_total_tokens}")
-            else:
-                logger.warning(f"Skipping file content block for '{file_path}' due to total token limit ({current_total_tokens} + {block_tokens} > {max_total_tokens}).")
-                # Stop adding more files if limit is reached
-                break
 
-        return "\n\n".join(final_context_parts)
+    # def _get_contextual_content(self, # Replaced by _get_cpp_content_for_paths and logic within get_work_package_target_code_content
+    #                             relative_paths: list[str],
+    #                             max_tokens: int):
+    #     """
+    #     Retrieves full content for specified files, respecting token limits.
+    #     Args:
+    #         relative_paths (list[str]): Files needing full content.
+    #         max_tokens (int): The approximate maximum tokens allowed for the combined content.
+    #
+    #     Returns:
+    #         dict: A dictionary mapping relative paths to their full content.
+    #               Stops adding files if max_tokens is exceeded.
+    #     """
+    #     logger.warning("DEPRECATED: ContextManager._get_contextual_content called.")
+    #     return {} # Return empty dict as it's deprecated
 
-    def _get_dependencies_for_package(self, package_relative_paths: list[str]) -> list[str]:
-        """
-        Finds direct dependencies for a list of package files using the include graph.
+    # def _assemble_context_block(self, file_content_map: dict, other_context: dict, max_total_tokens: int) -> str: # Now handled by Executors
+    #     """
+    #     Assembles context from file contents and other provided context items
+    #     into a single string using Markdown formatting, respecting token limits.
+    #     Prioritizes 'other_context' first, then file contents.
+    #
+    #     Args:
+    #         file_content_map (dict): Dictionary mapping relative file paths to their full content.
+    #         other_context (dict): Dictionary of other context items (e.g., task descriptions, JSON data).
+    #         max_total_tokens (int): The overall token limit for the final context string.
+    #
+    #     Returns:
+    #         str: The assembled context string formatted with Markdown.
+    #     """
+    #     logger.warning("DEPRECATED: ContextManager._assemble_context_block called.")
+    #     return "" # Return empty string as it's deprecated
 
-        Args:
-            package_relative_paths (list[str]): List of relative file paths belonging to the package.
-
-        Returns:
-            list[str]: A list of unique relative paths of files directly included by the package files,
-                       excluding the package files themselves and ensuring they are within the project.
-        """
-        if not self.include_graph:
-            logger.warning("Include graph not loaded. Cannot determine dependencies.")
-            return []
-
-        all_dependencies = set()
-        package_files_set = set(p.replace('\\', '/') for p in package_relative_paths) # Normalize paths
-
-        for pkg_file_rel in package_files_set:
-            # Ensure the file exists in the graph keys (normalize just in case)
-            normalized_pkg_file = pkg_file_rel.replace('\\', '/')
-            if normalized_pkg_file in self.include_graph:
-                # Get the list of files included by this package file
-                direct_includes = self.include_graph[normalized_pkg_file] # This is expected to be a list of dicts like {'path': '...', 'weight': ...}
-                if isinstance(direct_includes, list):
-                    for include_item in direct_includes:
-                        # Check if the item is a dictionary with a 'path' key
-                        if isinstance(include_item, dict) and 'path' in include_item:
-                            included_file_path = include_item['path']
-                            if not isinstance(included_file_path, str):
-                                logger.warning(f"Include item for '{normalized_pkg_file}' has non-string path: {include_item}. Skipping.")
-                                continue
-                            normalized_include = included_file_path.replace('\\', '/')
-                        elif isinstance(include_item, str):
-                            # Handle potential older format where it might just be a string (less likely based on Step 2)
-                            logger.debug(f"Include item for '{normalized_pkg_file}' is a string (unexpected format): {include_item}. Processing anyway.")
-                            normalized_include = include_item.replace('\\', '/')
-                        else:
-                            logger.warning(f"Unexpected include item format for '{normalized_pkg_file}': {include_item}. Skipping.")
-                            continue
-
-                        # Add to dependencies only if it's not part of the original package
-                        if normalized_include not in package_files_set:
-                            # We assume the include graph already filtered for project files
-                            all_dependencies.add(normalized_include)
-                else:
-                    logger.warning(f"Include graph entry for '{normalized_pkg_file}' is not a list: {direct_includes}")
-            # else:
-                # logger.debug(f"Package file '{normalized_pkg_file}' not found as a key in the include graph.")
-
-        logger.debug(f"Found {len(all_dependencies)} unique dependencies for package files: {package_relative_paths}")
-        return sorted(list(all_dependencies))
+    # def _get_dependencies_for_package(self, package_relative_paths: list[str]) -> list[str]: # Logic might move or be adapted in Executors
+    #     """
+    #     Finds direct dependencies for a list of package files using the include graph.
+    #
+    #     Args:
+    #         package_relative_paths (list[str]): List of relative file paths belonging to the package.
+    #
+    #     Returns:
+    #         list[str]: A list of unique relative paths of files directly included by the package files,
+    #                    excluding the package files themselves and ensuring they are within the project.
+    #     """
+    #     logger.warning("DEPRECATED: ContextManager._get_dependencies_for_package called.")
+    #     # This logic might be needed by executors, but doesn't belong solely in ContextManager anymore
+    #     return [] # Return empty list as it's deprecated
 
     # --- Method for assembling context for specific steps ---
 
-    def get_context_for_step(self, step_name: str, **kwargs) -> str:
-        """
-        Assembles context for a given workflow step, retrieving full content for all specified files.
-
-        Args:
-            step_name (str): Identifier for the workflow step (e.g., "STRUCTURE_DEFINITION").
-            primary_relative_paths (list[str]): List of primary file paths for the step.
-            dependency_relative_paths (list[str]): List of dependency file paths for the step.
-            **kwargs: Additional context items (e.g., 'task_description', 'work_package_info').
-
-        Returns:
-            str: The assembled context string formatted with Markdown, or empty string on error.
-        """
-        # Extract file path lists from kwargs, providing empty lists as defaults
-        primary_relative_paths = kwargs.get('primary_relative_paths', [])
-        dependency_relative_paths = kwargs.get('dependency_relative_paths', [])
-
-        # Combine primary and dependency files into a single list of unique paths
-        all_relative_paths = sorted(list(set(primary_relative_paths + dependency_relative_paths)))
-
-        logger.info(f"Assembling context for STEP '{step_name}' ({len(all_relative_paths)} total files)")
-
-        # --- Configuration ---
-        # Use MAX_CONTEXT_TOKENS from config
-        # Subtract a buffer for the prompt itself and potential LLM response overhead
-        prompt_buffer = config.PROMPT_TOKEN_BUFFER
-        max_total_tokens = config.MAX_CONTEXT_TOKENS
-        max_context_assembly_tokens = max_total_tokens - prompt_buffer
-        if max_context_assembly_tokens <= 0:
-             logger.error(f"MAX_CONTEXT_TOKENS ({max_total_tokens}) is too small with buffer ({prompt_buffer}). Cannot assemble context.")
-             return ""
-
-        # --- Separate other context from file path args ---
-        other_context = {k: v for k, v in kwargs.items() if k not in ['primary_relative_paths', 'dependency_relative_paths']}
-
-        # --- Retrieve Contextual File Content ---
-        # Allocate budget for file content (now always full content)
-        # Use CONTEXT_FILE_BUDGET_RATIO from config
-        file_content_budget = int(max_context_assembly_tokens * config.CONTEXT_FILE_BUDGET_RATIO)
-        file_content_map = self._get_contextual_content(
-            relative_paths=all_relative_paths,
-            max_tokens=file_content_budget
-        )
-
-        if not file_content_map and all_relative_paths:
-             logger.warning(f"Failed to retrieve content for any specified files for step '{step_name}'. Context might be incomplete.")
-             # Proceed with only other_context if available, but log warning
-
-        # --- Assemble Final Context Block ---
-        # The assembly limit here applies to the final formatted string
-        final_context = self._assemble_context_block(
-            file_content_map=file_content_map,
-            other_context=other_context,
-            max_total_tokens=max_context_assembly_tokens
-        )
-
-        final_token_count = count_tokens(final_context)
-        logger.info(f"Assembled context for STEP '{step_name}' ({final_token_count} tokens / {max_context_assembly_tokens} assembly limit).")
-
-        if final_token_count >= max_context_assembly_tokens:
-             logger.warning(f"Final assembled context for {step_name} might be exceeding token limit!")
-        elif not final_context:
-             logger.warning(f"Assembled context for {step_name} is empty.")
-
-
-        return final_context
+    # def get_context_for_step(self, step_name: str, **kwargs) -> str: # DEPRECATED
+    #     """
+    #     Assembles context for a given workflow step, retrieving full content for all specified files.
+    #
+    #     Args:
+    #         step_name (str): Identifier for the workflow step (e.g., "STRUCTURE_DEFINITION").
+    #         primary_relative_paths (list[str]): List of primary file paths for the step.
+    #         dependency_relative_paths (list[str]): List of dependency file paths for the step.
+    #         **kwargs: Additional context items (e.g., 'task_description', 'work_package_info').
+    #
+    #     Returns:
+    #         str: The assembled context string formatted with Markdown, or empty string on error.
+    #     """
+    #     logger.warning(f"DEPRECATED: ContextManager.get_context_for_step called for step '{step_name}'.")
+    #     return "" # Return empty string as it's deprecated
