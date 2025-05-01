@@ -6,7 +6,7 @@ from src.logger_setup import get_logger
 import src.config as config
 from .state_manager import StateManager
 from .context_manager import ContextManager
-from .remapping_logic import RemappingLogic
+from ..tools.remapping_logic import RemappingLogic
 from .tool_interfaces import IFileWriter, IFileReplacer, IFileReader, ISyntaxValidator
 from .step_executor import StepExecutor
 # Import concrete executors (adjust path if they are in a subfolder like 'executors')
@@ -58,9 +58,10 @@ class Orchestrator:
 
         # Context Manager (needs graph path, source dir, analysis dir, and state manager)
         self.context_manager = ContextManager(
-            include_graph_path=self.include_graph_path,
             cpp_source_dir=self.cpp_project_dir,
+            godot_project_dir=self.config_dict["GODOT_PROJECT_DIR"],
             analysis_output_dir=self.analysis_dir,
+            instruction_dir=self.config_dict.get("INSTRUCTION_DIR"),
             state_manager=self.state_manager # Pass state manager instance
         )
         # Ensure ContextManager loads the include graph if Step 1 might have just run

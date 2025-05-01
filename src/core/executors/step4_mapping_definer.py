@@ -186,10 +186,6 @@ class Step4Executor(StepExecutor):
              logger.info("Loaded global packages summary (packages.json) via StateManager.")
 
 
-        # --- Get List of Existing Godot Output Files ---
-        existing_godot_outputs = self.context_manager.get_existing_godot_output_files(str(godot_project_dir))
-
-
         # --- Initialize Overall Mapping Summary ---
         overall_mapping_summary: Dict[str, Any] = {
             "package_summaries": {},

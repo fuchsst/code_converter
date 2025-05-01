@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional, Type
 from ..step_executor import StepExecutor
 from ..state_manager import StateManager
 from ..context_manager import ContextManager, count_tokens, read_godot_file_content
-from ..remapping_logic import RemappingLogic
+from ...tools.remapping_logic import RemappingLogic
 # Standard library imports
 import os
 import json
@@ -18,7 +18,7 @@ from crewai import Crew, Process, Task, Agent
 from ..step_executor import StepExecutor
 from ..state_manager import StateManager
 from ..context_manager import ContextManager
-from ..remapping_logic import RemappingLogic
+from ...tools.remapping_logic import RemappingLogic
 from ..tool_interfaces import IFileWriter, IFileReplacer, IFileReader, ISyntaxValidator # Keep interfaces for tool wrappers if needed
 
 # Import NEW agents

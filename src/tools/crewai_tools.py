@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 
 # Import the existing wrappers/logic these tools will use
 from .framework_tools_wrapper import CrewAIFileWriter, CrewAIFileReader, CustomFileReplacer, GodotSyntaxValidator
-from ..core.remapping_logic import RemappingLogic
+from .remapping_logic import RemappingLogic
 from ..core.tool_interfaces import IFileWriter, IFileReader, IFileReplacer, ISyntaxValidator # For type hints
 from src.logger_setup import get_logger
 
