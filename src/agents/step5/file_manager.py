@@ -16,22 +16,23 @@ def get_file_manager_agent(llm_instance: BaseLLM, tools: List[BaseTool]):
         tools: A list containing the instantiated file operation tool(s)
                 (e.g., FileWriterTool, FileReplacerTool).
     """
-    tool_names = [t.name for t in tools if hasattr(t, 'name')]
+    # Explicitly find tool names for clarity in prompts
+    writer_tool_name = next((t.name for t in tools if "Writer" in t.name), "FileWriterTool")
+    replacer_tool_name = next((t.name for t in tools if "Replacer" in t.name), "FileReplacerTool")
+
     return Agent(
         role="File System Operations Specialist",
         goal=(
-            f"Perform file system operations based on instructions using the provided tools ({', '.join(tool_names)}). "
-            f"Receive instructions specifying the operation (write or replace), the target file path, "
-            f"the content to write, and potentially a search block for replacement. "
-            f"Execute the correct tool ('{tools[0].name if len(tools)>0 else 'File Writer'}' or "
-            f"'{tools[1].name if len(tools)>1 else 'File Replacer'}') with the exact parameters provided in the context/task description. "
-            f"Report the outcome message returned by the tool."
+            f"Your SOLE task is to execute ONE file operation using ONE of your tools: '{writer_tool_name}' or '{replacer_tool_name}'. "
+            f"You will receive `file_path`, `content`, and `output_format` ('FULL_FILE' or 'CODE_BLOCK'). You might also receive `search_block`. "
+            f"**Decision Logic:** "
+            f"1. If `output_format` is 'FULL_FILE', you MUST use the '{writer_tool_name}' tool. Pass `file_path` and `content` to it. "
+            f"2. If `output_format` is 'CODE_BLOCK', you MUST use the '{replacer_tool_name}' tool. Construct the exact `diff` string ('<<<<<<< SEARCH\\n[search_block]\\n=======\\n[content]\\n>>>>>>> REPLACE') and pass `file_path` and `diff` to it. "
+            f"Execute the chosen tool EXACTLY ONCE with the correct parameters. Report the result message from the tool."
         ),
         backstory=(
-            f"You are a reliable assistant responsible for interacting with the file system via specific, approved tools. "
-            f"You follow instructions precisely to either write content to a new file or replace a specific block of content in an existing file. "
-            f"You understand the importance of using the correct tool and providing the exact file path, content, and search block (if required). "
-            f"You do not generate code or make decisions about *what* to write; you only execute the requested file operation using your tools and report the result."
+            f"You are a highly specialized file operations agent. You only perform one action: writing a file or replacing content in a file using your specific tools ('{writer_tool_name}', '{replacer_tool_name}'). "
+            f"You strictly follow the Decision Logic in your goal based on the `output_format` parameter to select the correct tool and provide the exact required inputs."
         ),
         llm=llm_instance,
         verbose=True,

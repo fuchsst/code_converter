@@ -8,27 +8,29 @@ from typing import List
 
 logger = get_logger(__name__)
 
-def get_syntax_validation_agent(llm_instance: BaseLLM, tools: List[BaseTool]):
+def get_project_validation_agent(llm_instance: BaseLLM, tools: List[BaseTool]):
     """
-    Creates and returns the configured CrewAI Agent instance for syntax validation.
+    Creates and returns the configured CrewAI Agent instance for project validation
+    after a file modification.
 
     Args:
         llm_instance: The pre-configured LLM instance to use.
-        tools: A list containing the instantiated validation tool(s) (e.g., GodotSyntaxValidatorTool).
+        tools: A list containing the instantiated validation tool(s) (e.g., GodotProjectValidatorTool).
     """
+    tool_name = tools[0].name if tools else 'Godot Project Validator'
     return Agent(
-        role=f"{config.TARGET_LANGUAGE} Syntax Validation Specialist",
+        role="Godot Project Post-Modification Validator",
         goal=(
-            f"Validate the syntax of the provided {config.TARGET_LANGUAGE} code snippet using the "
-            f"'{tools[0].name if tools else 'Godot Syntax Validator'}' tool. " # Dynamically reference tool name if possible
-            f"Receive the code snippet as input context. Execute the validation tool with the code. "
-            f"Report the exact output from the tool (either success message or error details)."
+            f"Validate the Godot project's integrity after a file modification, focusing on errors related to the changed file. "
+            f"Receive the absolute path to the Godot project directory (`godot_project_path`) and the `res://` path of the modified file (`target_file_path`) as input context. "
+            f"Execute the '{tool_name}' tool, providing these two paths. "
+            f"Report the exact output from the tool, which will indicate overall project validation success or list only the errors relevant to the `target_file_path`."
         ),
         backstory=(
-            f"You are a meticulous quality assurance agent specializing in {config.TARGET_LANGUAGE} code for Godot Engine 4.x. "
-            f"Your sole focus is on verifying the syntactic correctness of code snippets provided to you. "
-            f"You use a specific tool designed to interface with the Godot engine's validator. "
-            f"You don't write or modify code; you only run the validation tool and report its findings accurately."
+            f"You are a meticulous quality assurance agent specializing in Godot Engine 4.x projects. "
+            f"Your role is to verify that recent code changes haven't introduced parsing or integration errors within the project context. "
+            f"You use a specific tool ('{tool_name}') that runs the Godot editor headlessly to check the entire project, but you focus your report on issues directly related to the file that was just modified. "
+            f"You accurately report the tool's findings, indicating success or detailing the relevant errors."
         ),
         llm=llm_instance,
         verbose=True,

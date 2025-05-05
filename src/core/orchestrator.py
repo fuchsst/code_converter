@@ -7,7 +7,8 @@ import src.config as config
 from .state_manager import StateManager
 from .context_manager import ContextManager
 from ..tools.remapping_logic import RemappingLogic
-from .tool_interfaces import IFileWriter, IFileReplacer, IFileReader, ISyntaxValidator
+
+from .tool_interfaces import IFileWriter, IFileReplacer, IFileReader
 from .step_executor import StepExecutor
 # Import concrete executors (adjust path if they are in a subfolder like 'executors')
 from .executors.step1_analyzer import Step1Executor
@@ -15,9 +16,8 @@ from .executors.step2_package_identifier import Step2Executor
 from .executors.step3_structure_definer import Step3Executor
 from .executors.step4_mapping_definer import Step4Executor
 from .executors.step5_process_code import Step5Executor
-# Import concrete tool wrappers
 from src.tools.framework_tools_wrapper import (
-    CrewAIFileWriter, CrewAIFileReader, CustomFileReplacer, GodotSyntaxValidator
+    CrewAIFileWriter, CrewAIFileReader, CustomFileReplacer
 )
 import litellm # Import litellm
 
@@ -165,8 +165,7 @@ class Orchestrator:
         tools = {
             IFileWriter: CrewAIFileWriter(),
             IFileReplacer: CustomFileReplacer(),
-            IFileReader: CrewAIFileReader(),
-            ISyntaxValidator: GodotSyntaxValidator()
+            IFileReader: CrewAIFileReader()
         }
         logger.debug("Tool wrappers initialized.")
         return tools

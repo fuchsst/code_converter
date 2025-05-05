@@ -23,7 +23,7 @@ from ..tool_interfaces import IFileWriter, IFileReplacer, IFileReader, ISyntaxVa
 
 # Import NEW agents
 from src.agents.step5.code_generator import get_code_generator_agent
-from src.agents.step5.syntax_validator import get_syntax_validation_agent
+from src.agents.step5.syntax_validator import get_project_validation_agent
 from src.agents.step5.code_refiner import get_code_refinement_agent
 from src.agents.step5.file_manager import get_file_manager_agent
 from src.agents.step5.remapping_advisor import get_remapping_advisor_agent
@@ -32,8 +32,9 @@ from src.agents.step5.remapping_advisor import get_remapping_advisor_agent
 from src.tools.crewai_tools import (
     FileWriterTool,
     FileReplacerTool,
-    GodotSyntaxValidatorTool,
-    RemappingLogicTool
+    GodotProjectValidatorTool,
+    RemappingLogicTool,
+    FileReaderTool
 )
 
 # Import NEW Task definitions
@@ -89,9 +90,9 @@ class Step5Executor(StepExecutor):
         # Tools need to be instantiated here as they might have dependencies or state
         file_writer_tool = FileWriterTool()
         file_replacer_tool = FileReplacerTool()
-        syntax_validator_tool = GodotSyntaxValidatorTool()
-        # Pass the remapping logic instance to the tool if needed
-        remapping_tool = RemappingLogicTool(remapping_logic=self.remapping_logic)
+        project_validator_tool = GodotProjectValidatorTool()
+        file_reader_tool = FileReaderTool()
+        remapping_tool = RemappingLogicTool()
         logger.info("Instantiated CrewAI tools for Step 5.")
 
         # Instantiate LLMs using the helper method
@@ -123,9 +124,9 @@ class Step5Executor(StepExecutor):
 
 
         # Instantiate Agents
-        code_generator_agent = get_code_generator_agent(generator_llm_instance)
-        syntax_validator_agent = get_syntax_validation_agent(validator_llm_instance, tools=[syntax_validator_tool])
-        code_refinement_agent = get_code_refinement_agent(refiner_llm_instance) # Use potentially fallback instance
+        code_generator_agent = get_code_generator_agent(generator_llm_instance, tools=[file_reader_tool])
+        project_validator_agent = get_project_validation_agent(validator_llm_instance, tools=[project_validator_tool])
+        code_refinement_agent = get_code_refinement_agent(refiner_llm_instance, tools=[file_reader_tool])
         file_manager_agent = get_file_manager_agent(file_manager_llm_instance, tools=[file_writer_tool, file_replacer_tool])
         # Pass the instantiated tool to the agent
         remapping_advisor_agent = get_remapping_advisor_agent(remapping_llm_instance, tools=[remapping_tool])
@@ -154,33 +155,48 @@ class Step5Executor(StepExecutor):
              self.state_manager.update_workflow_status('step5_complete') # Or skipped status
              return True
 
+        # Define all states that imply Step 4 (mapping) is done
+        step4_completed_or_later_states = {
+            target_status, # 'mapping_defined'
+            'running_processing',
+            processed_status, # 'processed'
+            'needs_remapping',
+        } | set(failed_status_prefixes) # Add 'failed_processing', 'failed_remapping'
+
         # Determine potential targets based on initial state and force flag
         for pkg_id, pkg_data in all_packages.items():
              current_status = pkg_data.get('status')
              is_target = (current_status == target_status)
-             is_failed_this_step = any(current_status.startswith(prefix) for prefix in failed_status_prefixes)
-             is_processed = (current_status == processed_status)
+             # Check if the status is one indicating Step 4 was done
+             is_step4_done_or_later = current_status in step4_completed_or_later_states
 
              matches_specific_request = (not package_ids or pkg_id in package_ids)
 
-             if matches_specific_request and (is_target or (force and (is_failed_this_step or is_processed))):
-                  potential_target_package_ids.add(pkg_id)
+             if matches_specific_request:
+                  # Eligible if: It's the target status OR (force=True AND Step 4 was completed or a later state was reached)
+                  if is_target or (force and is_step4_done_or_later):
+                       potential_target_package_ids.add(pkg_id)
 
-        # Filter the list from _get_eligible_packages and reset status if needed
-        for pkg_id in eligible_packages_for_run:
-             if pkg_id in potential_target_package_ids: # Ensure it's a potential target
-                  pkg_data = all_packages[pkg_id]
-                  current_status = pkg_data.get('status')
-                  is_failed_this_step = any(current_status.startswith(prefix) for prefix in failed_status_prefixes)
-                  is_processed = (current_status == processed_status)
+        # Build the list for *this run* based on potential targets and force flag
+        for pkg_id in potential_target_package_ids:
+             pkg_data = all_packages[pkg_id]
+             current_status = pkg_data.get('status')
+             is_target = (current_status == target_status)
+             is_running_this_step = (current_status == 'running_processing') # Check if interrupted during this step
+             is_step4_done_or_later = current_status in step4_completed_or_later_states
 
-                  if current_status == target_status:
-                       packages_to_process_this_run.append(pkg_id)
-                  elif force and (is_failed_this_step or is_processed):
-                       logger.info(f"Force=True: Adding previously failed/processed package '{pkg_id}' (status: {current_status}) to process list for Step 5.")
-                       # Reset status to target status before processing
-                       self.state_manager.update_package_state(pkg_id, target_status, error=None) # Clear previous error
-                       packages_to_process_this_run.append(pkg_id)
+             if is_target or is_running_this_step:
+                  # If it's the normal target status OR was interrupted during this step's processing, add it
+                  if is_running_this_step:
+                       logger.info(f"Resuming processing for package '{pkg_id}' found in state 'running_processing'.")
+                  packages_to_process_this_run.append(pkg_id)
+             elif force and is_step4_done_or_later:
+                  # If force=True and it's in *any* state after mapping_defined (and not target/running), add it and reset status
+                  logger.info(f"Force=True: Adding package '{pkg_id}' (status: {current_status}) to process list for Step 5.")
+                  # Reset status to target status before processing
+                  self.state_manager.update_package_state(pkg_id, target_status, error=None) # Clear previous error/status
+                  packages_to_process_this_run.append(pkg_id)
+             # Else: It was a potential target but not in the right state for this run (e.g., completed/failed without force)
 
         if not packages_to_process_this_run:
             logger.info("No packages require processing in this Step 5 run.")
@@ -200,13 +216,31 @@ class Step5Executor(StepExecutor):
                       self.state_manager.update_workflow_status('step5_complete') # Or 'completed'
             return True # Indicate this specific invocation had nothing to fail on
 
-        logger.info(f"Packages to process in this Step 5 run (Force={force}): {packages_to_process_this_run}")
+        logger.info(f"Eligible packages identified for this Step 5 run (Force={force}): {packages_to_process_this_run}")
+
+        # --- Fetch Processing Order ---
+        processing_order = self.state_manager.get_package_processing_order()
+        if processing_order is None:
+            logger.error("Critical: Package processing order is missing from state. Cannot ensure correct execution order for Step 5.")
+            self.state_manager.update_workflow_status('failed_step5', "Processing order missing.")
+            return False
+        if not isinstance(processing_order, list):
+             logger.error(f"Critical: Package processing order is not a list (type: {type(processing_order)}). Invalid state.")
+             self.state_manager.update_workflow_status('failed_step5', "Invalid processing order format.")
+             return False
+
+        # --- Process packages iteratively IN ORDER ---
         self.state_manager.update_workflow_status('running_step5')
         overall_success_this_run = True # Tracks success *of this specific execution run*
+        processed_a_package = False # Track if any package was actually processed in this run
 
+        for pkg_id in processing_order:
+            # Process only if the package is in the eligible list for this run
+            if pkg_id not in packages_to_process_this_run:
+                continue
 
-        for pkg_id in packages_to_process_this_run:
-            logger.info(f"Processing Step 5 for package: {pkg_id}")
+            processed_a_package = True # Mark that we are processing at least one
+            logger.info(f"Processing Step 5 for package: {pkg_id} (in defined order)")
             self.state_manager.update_package_state(pkg_id, status='running_processing')
             package_success = True # Track success per package
 
@@ -307,7 +341,7 @@ class Step5Executor(StepExecutor):
                 package_crew = Crew(
                     agents=[ # List ALL worker agents
                         code_generator_agent,
-                        syntax_validator_agent,
+                        project_validator_agent,
                         code_refinement_agent,
                         file_manager_agent,
                         remapping_advisor_agent
@@ -322,9 +356,7 @@ class Step5Executor(StepExecutor):
                 )
 
                 logger.info(f"Kicking off Hierarchical Crew for Package {pkg_id} with {len(task_items)} items...")
-                # Pass package-level inputs if needed by tasks (e.g., package ID)
-                crew_inputs = {'package_id': pkg_id}
-                crew_result = package_crew.kickoff(inputs=crew_inputs)
+                crew_result = package_crew.kickoff()
                 logger.info(f"Hierarchical Crew finished for Package {pkg_id}.")
                 logger.debug(f"Crew Result Raw Output:\n{crew_result}") # Log raw output for debugging
 
@@ -450,13 +482,43 @@ class Step5Executor(StepExecutor):
         """Creates the list of CrewAI tasks for a work package."""
         crew_tasks: List[Task] = []
         item_processing_tasks: List[Task] = [] # Keep track of item tasks for final analysis context
+        godot_project_path = self.config.get("GODOT_PROJECT_DIR") # Get base Godot dir (absolute path)
+        if not godot_project_path:
+             raise Exception("GODOT_PROJECT_DIR not configured. Cannot proceed with task creation.")
 
         for task_item in task_items:
-            # Create task for the manager to process this item
+            item_context_parts = [
+                package_context_str,
+                f"\n\n**Godot Project Path:** `{godot_project_path}`" # Add project path to context
+            ]
+
+            # Attempt to read target file content for this specific item
+            target_godot_file_res_path = task_item.get('output_godot_file')
+            target_file_content = None
+            if target_godot_file_res_path and target_godot_file_res_path.startswith("res://"):
+                relative_path = target_godot_file_res_path[len("res://"):]
+                absolute_path = os.path.join(godot_project_path, relative_path)
+                # Use the imported read_godot_file_content function
+                target_file_content = read_godot_file_content(absolute_path)
+                if target_file_content is not None:
+                    logger.debug(f"Read content for target file: {target_godot_file_res_path}")
+                    item_context_parts.append(
+                        f"\n\n**Target File Content (`{target_godot_file_res_path}`):**\n"
+                        f"```gdscript\n{target_file_content}\n```"
+                    )
+                else:
+                    logger.warning(f"Could not read content for target file: {target_godot_file_res_path} (Path: {absolute_path})")
+            elif target_godot_file_res_path:
+                 logger.warning(f"Target file path '{target_godot_file_res_path}' does not start with 'res://' or GODOT_PROJECT_DIR is missing. Cannot read content.")
+
+            # Combine context for this item
+            item_specific_context_str = "\n".join(item_context_parts)
+
+            # Create task for the manager to process this item using item-specific context
             item_task = create_hierarchical_process_taskitem_task(
                 manager_agent=None, # Manager is implicit
                 task_item_details=task_item,
-                package_context=package_context_str,
+                package_context=item_specific_context_str,
                 instructions=instructions,
                 dependent_tasks=None # Let manager handle sequence/context flow
             )
@@ -481,9 +543,31 @@ class Step5Executor(StepExecutor):
     def _log_step5_task_completion(self, task_output: TaskOutput):
         """Logs information about each completed task within the Step 5 crew."""
         try:
-            agent_role = task_output.agent.role if task_output.agent else "Unknown Agent"
-            task_desc_snippet = task_output.task.description[:100] + "..." if task_output.task else "Unknown Task"
-            output_snippet = task_output.raw_output[:150].replace('\n', ' ') + "..." if task_output.raw_output else "No output"
+            # Robustly determine agent role
+            agent_role = "Unknown Agent"
+            if hasattr(task_output, 'agent') and task_output.agent:
+                # Check if it's actually an Agent object before accessing role
+                if isinstance(task_output.agent, Agent):
+                    agent_role = task_output.agent.role
+                else:
+                    # Log if it's not an Agent object (e.g., could be a string ID)
+                    logger.warning(f"[Step 5 Crew Callback] task_output.agent is not an Agent object (Type: {type(task_output.agent)}). Using placeholder role.")
+                    agent_role = f"Agent ({type(task_output.agent).__name__})"
+
+            # Robustly determine task description
+            task_desc_snippet = "Unknown Task"
+            if hasattr(task_output, 'task') and task_output.task and hasattr(task_output.task, 'description'):
+                 task_desc_snippet = task_output.task.description[:100] + "..."
+            elif hasattr(task_output, 'description') and isinstance(task_output.description, str): # Fallback if task object isn't populated but description is
+                 task_desc_snippet = task_output.description[:100] + "..."
+
+            # Robustly determine output snippet
+            output_snippet = "No output"
+            if hasattr(task_output, 'raw_output') and task_output.raw_output is not None:
+                 output_snippet = str(task_output.raw_output)[:150].replace('\n', ' ') + "..."
+            elif hasattr(task_output, 'output') and task_output.output is not None: # Fallback
+                 output_snippet = str(task_output.output)[:150].replace('\n', ' ') + "..."
+
 
             logger.info(f"[Step 5 Crew Callback] Task Completed:")
             logger.info(f"  - Agent: {agent_role}")

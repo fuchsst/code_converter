@@ -4,7 +4,8 @@ from crewai import Task, Agent
 from src.logger_setup import get_logger
 import src.config as config
 from typing import List, Dict, Any, Optional
-from pydantic.v1 import BaseModel, Field # Use Pydantic v1 if needed for Task context/output
+from pydantic import BaseModel, Field
+from typing import Optional, Literal
 
 logger = get_logger(__name__)
 
@@ -26,6 +27,12 @@ class RemappingAdvice(BaseModel):
     recommend_remapping: bool = Field(..., description="True if remapping is recommended, False otherwise.")
     reason: Optional[str] = Field(description="Explanation for the recommendation.")
     feedback: Optional[str] = Field(description="Detailed feedback for Step 4 if remapping is recommended.")
+
+class CodeGenerationResult(BaseModel):
+    """Represents the structured output from the CodeGeneratorAgent."""
+    generated_code: str = Field(..., description="The generated Godot code string.")
+    output_format: Literal['FULL_FILE', 'CODE_BLOCK'] = Field(..., description="Indicates if the code is for a full file or a replacement block.")
+    search_block: Optional[str] = Field(None, description="The exact code block to search for if output_format is 'CODE_BLOCK'.")
 
 
 # --- Task Definitions for Hierarchical Process ---
@@ -69,18 +76,29 @@ def create_hierarchical_process_taskitem_task(
         f"{package_context}\n"
         "--- END OF PROVIDED CONTEXT ---\n\n"
         f"**Your Orchestration Steps (Delegate to appropriate agents):**\n"
-        f"1.  **Generate Code:** Delegate to the 'CodeGeneratorAgent'. Provide it with the task item details and relevant package context. The agent should return only the generated {config.TARGET_LANGUAGE} code string.\n"
-        f"2.  **Determine Output Format & Search Block:** Analyze the generated code and task item details. Decide if the output is 'FULL_FILE' or 'CODE_BLOCK'. If 'CODE_BLOCK', extract the exact original code block (`search_block`) from the existing Godot code (found within the package context or potentially read via a tool if necessary) that the generated code should replace. *Self-correction: The CodeGeneratorAgent might be able to provide this info directly based on its input task, simplifying this step.*\n"
-        f"3.  **Validate Syntax:** Delegate to the 'SyntaxValidationAgent'. Provide the generated code. The agent will use the 'Godot Syntax Validator' tool and return a success message or error details.\n"
-        f"4.  **Refine Code (If Validation Failed):** If step 3 reported errors, delegate to the 'CodeRefinementAgent'. Provide the original generated code and the validation errors. The agent should return the corrected code or indicate failure.\n"
-        f"5.  **Re-Validate (If Refined):** If code was refined in step 4, delegate to the 'SyntaxValidationAgent' again with the *refined* code.\n"
-        f"6.  **File Operation:** If syntax validation is successful (either initially or after refinement), delegate to the 'FileManagerAgent'. Provide:\n"
-        f"    - The final, validated {config.TARGET_LANGUAGE} code.\n"
-        f"    - The target file path: `{target_file}`.\n"
-        f"    - The determined `output_format` ('FULL_FILE' or 'CODE_BLOCK').\n"
-        f"    - The `search_block` (if `output_format` is 'CODE_BLOCK').\n"
-        f"    Use the 'File Writer' tool for 'FULL_FILE' or the 'File Content Replacer' tool for 'CODE_BLOCK'. The agent will return the tool's execution status message.\n"
-        f"7.  **Consolidate Result:** Compile a final JSON result for this task item, including `task_id`, final `status` ('completed' or 'failed'), `target_godot_file`, `target_element`, and any relevant `error_message` from failed steps (generation, validation, refinement, file op)."
+        f"1.  **Generate Code & Determine Format:** Delegate to the agent with role 'Expert C++ to {config.TARGET_LANGUAGE} Translator & Formatter'. Provide task details and context. Expect a JSON object string conforming to `CodeGenerationResult`. Parse this result to get `generated_code`, `output_format`, and `search_block`.\n"
+        f"2.  **Initial File Operation:** Delegate to the agent with role 'File System Operations Specialist'. Provide these exact parameters:\n"
+        f"    - `file_path`: The target file path `{target_file}`.\n"
+        f"    - `content`: The `generated_code` from Step 1.\n"
+        f"    - `output_format`: The `output_format` from Step 1.\n"
+        f"    - `search_block`: The `search_block` from Step 1 (pass `None` or omit if not applicable).\n"
+        f"    Determine the correct tool: if `output_format` is 'FULL_FILE', the tool name is 'File Writer'; if `output_format` is 'CODE_BLOCK', the tool name is 'File Content Replacer'.\n"
+        f"    Delegate to the agent with role 'File System Operations Specialist', instructing it to use the determined tool name and providing the necessary parameters (`file_path`, `content`, `diff` if using 'File Content Replacer'). Record the status message returned by the agent.\n"
+        f"3.  **Validate Project:** If Step 2 succeeded, delegate to the agent with role 'Godot Project Post-Modification Validator'. Provide these exact parameters:\n"
+        f"    - `godot_project_path`: The absolute Godot project path (extracted from context).\n"
+        f"    - `target_file_path`: The target file path `{target_file}`.\n"
+        f"    This agent uses the 'Godot Project Validator' tool. Record the result (success or filtered errors).\n"
+        f"4.  **Refine Code (If Validation Failed):** If Step 3 reported errors, delegate to the agent with role '{config.TARGET_LANGUAGE} Code Refinement Specialist (Project Context)'. Provide these exact parameters:\n"
+        f"    - `target_file_path`: The target file path `{target_file}`.\n"
+        f"    - `validation_errors`: The relevant validation errors reported in Step 3.\n"
+        f"    This agent uses 'FileReaderTool' to get current content, refines it, and returns the *corrected code string*.\n"
+        f"5.  **Re-Apply Refined Code (If Refined):** If Step 4 produced refined code, delegate to the agent with role 'File System Operations Specialist' again. Provide these exact parameters:\n"
+        f"    - `file_path`: The target file path `{target_file}`.\n"
+        f"    - `content`: The *refined code string* (full file content) from Step 4.\n"
+        f"    Instruct the agent to use the tool named **'File Writer'** and provide the `file_path` and `content` parameters to it.\n"
+        f"    Record the status message returned by the agent.\n"
+        f"6.  **Re-Validate Project (If Refined):** If Step 5 was performed and succeeded, delegate to the agent with role 'Godot Project Post-Modification Validator' again, providing the same inputs as Step 3 (`godot_project_path` and `target_file_path`).\n"
+        f"7.  **Consolidate Result:** Compile the final `TaskItemProcessingResult` JSON. Include `task_id`, `target_godot_file`, `target_element`. Set `status` to 'completed' only if the relevant validation step (Step 3 or Step 6) passed and the corresponding file operation (Step 2 or Step 5) succeeded. Otherwise, set `status` to 'failed' and include relevant error messages from any failed step (generation, file ops, validation, refinement)."
     )
 
     return Task(

@@ -3,9 +3,7 @@ import os
 import re
 from typing import Any, Dict
 # Import the interfaces these wrappers will implement
-from ..core.tool_interfaces import IFileWriter, IFileReplacer, IFileReader, ISyntaxValidator
-# Import the actual local validator function
-from .godot_validator_tool import validate_gdscript_syntax
+from ..core.tool_interfaces import IFileWriter, IFileReplacer, IFileReader
 # Import standard CrewAI tools for read/write
 from crewai_tools import FileWriterTool, FileReadTool
 from src.logger_setup import get_logger
@@ -130,24 +128,3 @@ class CustomFileReplacer(IFileReplacer):
             logger.error(f"CustomFileReplacer failed unexpectedly for {path}: {e}", exc_info=True)
             return {'status': 'failure', 'message': f'Unexpected replace error: {e}'}
 
-
-class GodotSyntaxValidator(ISyntaxValidator):
-    """Implements ISyntaxValidator using the validate_gdscript_syntax function."""
-    def validate(self, script_content: str) -> Dict[str, Any]:
-        logger.debug("GodotSyntaxValidator: Calling local validate_gdscript_syntax function.")
-        # This wrapper *does* call the actual implementation directly,
-        # as it's a local Python function.
-        try:
-            # Ensure the function exists and is callable
-            if not callable(validate_gdscript_syntax):
-                 raise TypeError("validate_gdscript_syntax is not callable")
-
-            result = validate_gdscript_syntax(script_content=script_content)
-            # Ensure the result matches the expected interface structure
-            if not isinstance(result, dict) or 'status' not in result:
-                 logger.error(f"validate_gdscript_syntax returned unexpected format: {result}")
-                 return {'status': 'failure', 'errors': 'Validator function returned invalid format.'}
-            return result
-        except Exception as e:
-            logger.error(f"Error calling validate_gdscript_syntax: {e}", exc_info=True)
-            return {'status': 'failure', 'errors': f"Error during validation call: {e}"}
