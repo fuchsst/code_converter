@@ -1,5 +1,5 @@
 # Core dependencies
-crewai>=0.114.0
+crewai>=0.118.0
 openai>=1.0.0 # Explicitly add openai
 httpx>=0.23.0   # Explicitly add httpx
 google-genai

@@ -62,8 +62,23 @@ class FileWriterTool(BaseTool):
     writer: IFileWriter = CrewAIFileWriter() # Use the existing wrapper
 
     def _run(self, file_path: str, content: str) -> str:
-        logger.debug(f"FileWriterTool executing: path='{file_path}'")
-        result = self.writer.write(path=file_path, content=content)
+        logger.debug(f"FileWriterTool executing: received path='{file_path}'")
+        absolute_path = file_path # Assume it might be absolute already
+
+        # Check for res:// path and convert if necessary
+        if file_path.startswith("res://"):
+            godot_project_dir = config.GODOT_PROJECT_DIR
+            if godot_project_dir:
+                relative_path = file_path[len("res://"):]
+                absolute_path = os.path.abspath(os.path.join(godot_project_dir, relative_path))
+                logger.debug(f"FileWriterTool: Converted 'res://' path to absolute path: '{absolute_path}'")
+            else:
+                logger.error("FileWriterTool: Cannot convert 'res://' path because GODOT_PROJECT_DIR is not configured.")
+                return "Error: GODOT_PROJECT_DIR not configured, cannot resolve res:// path."
+
+        # Use the potentially converted absolute path
+        result = self.writer.write(path=absolute_path, content=content)
+        logger.info(f"FileWriterTool wrote '{absolute_path}' with content length {len(content)}.")
         # Return a descriptive string based on the result dict
         status = result.get('status', 'failure')
         message = result.get('message', 'No message provided.')
@@ -77,8 +92,23 @@ class FileReplacerTool(BaseTool):
     replacer: IFileReplacer = CustomFileReplacer() # Use the existing wrapper
 
     def _run(self, file_path: str, diff: str) -> str:
-        logger.debug(f"FileReplacerTool executing: path='{file_path}'")
-        result = self.replacer.replace(path=file_path, diff=diff)
+        logger.debug(f"FileReplacerTool executing: received path='{file_path}'")
+        absolute_path = file_path # Assume it might be absolute already
+
+        # Check for res:// path and convert if necessary
+        if file_path.startswith("res://"):
+            godot_project_dir = config.GODOT_PROJECT_DIR
+            if godot_project_dir:
+                relative_path = file_path[len("res://"):]
+                absolute_path = os.path.abspath(os.path.join(godot_project_dir, relative_path))
+                logger.debug(f"FileReplacerTool: Converted 'res://' path to absolute path: '{absolute_path}'")
+            else:
+                logger.error("FileReplacerTool: Cannot convert 'res://' path because GODOT_PROJECT_DIR is not configured.")
+                return "Error: GODOT_PROJECT_DIR not configured, cannot resolve res:// path."
+
+        # Use the potentially converted absolute path
+        result = self.replacer.replace(path=absolute_path, diff=diff)
+        logger.info(f"FileReplacerTool wrote '{absolute_path}'.")
         status = result.get('status', 'failure')
         message = result.get('message', 'No message provided.')
         return f"File Replace Status: {status}. Message: {message}"
