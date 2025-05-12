@@ -348,14 +348,38 @@ class Orchestrator:
              "step5": "mapping_defined",
          }
          # Special case for remapping
-         if step_name == "step4":
-              # Include packages needing remapping OR normally eligible
+         if step_name == "step3":
               eligible = []
               packages = self.state_manager.get_all_packages()
+              failed_status_prefix_step3 = 'failed_structure' # Align with Step3Executor
+              running_status_step3 = 'running_structure'   # Align with Step3Executor
+              target_status_step3 = 'identified'           # Align with Step3Executor
               for pkg_id, pkg_data in packages.items():
                    status = pkg_data.get('status')
-                   if status == 'needs_remapping' or status == 'structure_defined':
+                   if status == target_status_step3 or \
+                      status == running_status_step3 or \
+                      (status and status.startswith(failed_status_prefix_step3)):
                         eligible.append(pkg_id)
+              logger.info(f"Eligible packages for resuming Step 3: {eligible}")
+              return eligible
+         elif step_name == "step4":
+              eligible = []
+              packages = self.state_manager.get_all_packages()
+              # Align with statuses in Step4Executor
+              target_status_step4 = 'structure_defined'
+              needs_remapping_status_step4 = 'needs_remapping'
+              running_mapping_status_step4 = 'running_mapping'
+              running_remapping_status_step4 = 'running_remapping'
+              failed_status_prefix_mapping_step4 = 'failed_mapping'
+              failed_status_prefix_remapping_step4 = 'failed_remapping'
+
+              for pkg_id, pkg_data in packages.items():
+                   status = pkg_data.get('status')
+                   if status in [needs_remapping_status_step4, running_mapping_status_step4, running_remapping_status_step4] or \
+                      (status and status.startswith(failed_status_prefix_mapping_step4)) or \
+                      (status and status.startswith(failed_status_prefix_remapping_step4)):
+                        eligible.append(pkg_id)
+              logger.info(f"Eligible packages for resuming Step 4: {eligible}")
               return eligible
          elif step_name == "step5":
               # Only run for packages that are newly mapped

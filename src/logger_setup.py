@@ -25,7 +25,7 @@ class ColoredFormatter(logging.Formatter):
         record.color_end = self.RESET_CODE if record.color_start else ''
         return super().format(record)
 
-def setup_logging(log_level=logging.DEBUG):
+def setup_logging(log_level=logging.INFO):
     """Configures logging with colored console output"""
     if not os.path.exists(LOG_DIR):
         os.makedirs(LOG_DIR)

@@ -27,7 +27,7 @@ from src.tasks.step4.define_mapping import create_hierarchical_define_mapping_ta
 # Import utilities
 from src.utils.json_utils import parse_json_from_string
 from src.logger_setup import get_logger
-import src.config as global_config # Use alias
+import src.config as config # Use alias
 # Import TaskOutput for type hinting the callback parameter
 from crewai.tasks.task_output import TaskOutput
 
@@ -101,6 +101,8 @@ class Step4Executor(StepExecutor):
         failed_status_prefix_mapping = 'failed_mapping'
         failed_status_prefix_remapping = 'failed_remapping'
         needs_remapping_status = 'needs_remapping' # Status set by Step 5
+        running_remapping_status = 'running_remapping' # Status set by Step 5
+        running_mapping_status = 'running_mapping' # Status set by Step 4
         completed_status = 'mapping_defined' # Success status for this step
 
         all_packages = self.state_manager.get_all_packages()
@@ -212,17 +214,45 @@ class Step4Executor(StepExecutor):
         # --- Process Packages ---
         for pkg_id in packages_to_process_this_run:
             logger.info(f"Processing Step 4 for package: {pkg_id}")
-            pkg_info_before_run = self.state_manager.get_package_info(pkg_id) # Get state before update
-            is_remapping_run = (pkg_info_before_run.get('status') == needs_remapping_status or
-                                (force and (pkg_info_before_run.get('status', '').startswith(failed_status_prefix_mapping) or
-                                            pkg_info_before_run.get('status', '').startswith(failed_status_prefix_remapping) or
-                                            pkg_info_before_run.get('status') == completed_status))) # Also remapping if forcing completed
 
-            current_status_log = 'running_remapping' if is_remapping_run else 'running_mapping'
+            # --- Pre-run status updates and is_remapping_run determination ---
+            pkg_info_at_start_of_execute = all_packages.get(pkg_id, {}) # Use the initial snapshot
+            original_status_for_logic = pkg_info_at_start_of_execute.get('status')
+
+            is_remapping_run = (
+                original_status_for_logic == needs_remapping_status or
+                original_status_for_logic == running_remapping_status or
+                (original_status_for_logic and original_status_for_logic.startswith(failed_status_prefix_remapping)) or
+                (force and original_status_for_logic == completed_status) or # Forcing a completed package is like remapping
+                (force and original_status_for_logic and original_status_for_logic.startswith(failed_status_prefix_mapping)) # Forcing a failed mapping
+            )
+
+            if force and (original_status_for_logic.startswith(failed_status_prefix_mapping) or \
+                           original_status_for_logic.startswith(failed_status_prefix_remapping) or \
+                           original_status_for_logic == completed_status):
+                logger.info(f"Forcing package {pkg_id} (original status: {original_status_for_logic}): Resetting status to '{target_status}' and clearing error.")
+                self.state_manager.update_package_state(pkg_id, target_status, error=None)
+            elif not force and (original_status_for_logic.startswith(failed_status_prefix_mapping) or \
+                                 original_status_for_logic.startswith(failed_status_prefix_remapping)): # Auto-retry failed
+                logger.info(f"Auto-retrying failed package {pkg_id} (original status: {original_status_for_logic}): Clearing error.")
+                self.state_manager.update_package_state(pkg_id, original_status_for_logic, error=None)
+            elif original_status_for_logic == running_mapping_status or original_status_for_logic == running_remapping_status: # Resuming
+                logger.info(f"Resuming package {pkg_id} (original status: {original_status_for_logic}).")
+                self.state_manager.update_package_state(pkg_id, original_status_for_logic, error=None)
+
+            current_status_log = running_remapping_status if is_remapping_run else running_mapping_status
             self.state_manager.update_package_state(pkg_id, status=current_status_log)
 
-            # --- Define Artifact Names (Remains similar) ---
-            suffix = "_remapped" if is_remapping_run and pkg_info_before_run.get('status') != target_status else ""
+            # --- Define Artifact Names ---
+            # Suffix logic needs to use original_status_for_logic to correctly determine if it was a non-target status before this run
+            # A forced 'completed' or 'failed_mapping' should also get _remapped suffix if is_remapping_run is true.
+            suffix = ""
+            if is_remapping_run:
+                # Add suffix if it's a remapping run AND the original status wasn't the clean target_status
+                # or if it was forced from completed/failed_mapping.
+                if original_status_for_logic != target_status or \
+                   (force and (original_status_for_logic == completed_status or original_status_for_logic.startswith(failed_status_prefix_mapping))):
+                    suffix = "_remapped"
             json_artifact_filename = f"package_{pkg_id}_mapping{suffix}.json"
 
             # --- Load Existing Data for Context (Remains similar) ---
@@ -290,7 +320,7 @@ class Step4Executor(StepExecutor):
                 # 5. Source Code Content (respecting limits)
                 temp_context_so_far = "\n\n".join(context_parts)
                 tokens_so_far = count_tokens(temp_context_so_far) + count_tokens(instr_context)
-                max_source_tokens = int((global_config.MAX_CONTEXT_TOKENS - global_config.PROMPT_TOKEN_BUFFER) * 0.6) - tokens_so_far
+                max_source_tokens = int((config.MAX_CONTEXT_TOKENS - config.PROMPT_TOKEN_BUFFER) * 0.6) - tokens_so_far
                 if max_source_tokens > 0:
                     source_code = self.context_manager.get_work_package_source_code_content(pkg_id, max_tokens=max_source_tokens)
                     if source_code:
@@ -334,7 +364,7 @@ class Step4Executor(StepExecutor):
                 context_str = "\n\n---\n\n".join(context_parts)
                 final_tokens = count_tokens(context_str) + count_tokens(instr_context)
                 logger.info(f"Assembled context for Step 4 - {pkg_id} ({final_tokens} tokens).")
-                if final_tokens >= (global_config.MAX_CONTEXT_TOKENS - global_config.PROMPT_TOKEN_BUFFER):
+                if final_tokens >= (config.MAX_CONTEXT_TOKENS - config.PROMPT_TOKEN_BUFFER):
                      logger.warning(f"Context for {pkg_id} in Step 4 might be near or exceeding token limits!")
 
                 if not context_str:

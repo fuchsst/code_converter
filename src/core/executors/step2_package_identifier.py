@@ -5,29 +5,26 @@ from typing import Any, Dict, List, Optional, Tuple, Type
 import networkx as nx
 from crewai import Crew, Process
 
-from src.llms.litellm_gemini_llm import LiteLLMGeminiLLM
-
 from ..step_executor import StepExecutor
 from ..state_manager import StateManager
-from ..context_manager import ContextManager, count_tokens, read_file_content
+from ..context_manager import ContextManager, count_tokens, read_file_content, PACKAGES_JSON_FILENAME
 from src.logger_setup import get_logger
-import src.config as global_config # Use alias for clarity
+import src.config as config
 
 from src.utils.clustering_utils import cluster_files_by_dependency
 from src.agents.step2.package_describer import get_package_describer_agent
 from src.tasks.step2.describe_package import create_describe_package_task, PackageDescriptionOutput
 from src.agents.step2.package_refiner import get_package_refinement_agent
 from src.tasks.step2.refine_descriptions import create_refined_descriptions_task, RefinedDescriptionsOutput
-from crewai import LLM as CrewAI_LLM
 from src.utils.json_utils import parse_json_from_string
 
 logger = get_logger(__name__)
 
 # --- Constants from Config ---
 # These might be overridden by self.config in methods
-LLM_DESC_MAX_TOKENS_RATIO = global_config.LLM_DESC_MAX_TOKENS_RATIO
-LLM_PROMPT_BUFFER = global_config.PROMPT_TOKEN_BUFFER
-LLM_CALL_RETRIES = global_config.LLM_CALL_RETRIES
+LLM_DESC_MAX_TOKENS_RATIO = config.LLM_DESC_MAX_TOKENS_RATIO
+LLM_PROMPT_BUFFER = config.PROMPT_TOKEN_BUFFER
+LLM_CALL_RETRIES = config.LLM_CALL_RETRIES
 
 class Step2Executor(StepExecutor):
     """
@@ -129,7 +126,7 @@ class Step2Executor(StepExecutor):
         if force:
             logger.warning("Force flag is set. Re-running Step 2 partitioning and description generation.")
             # Reset relevant state? Clear existing packages?
-            self.context_manager.save_packages_data({}, None) # Clear saved packages.json
+            self.state_manager.save_artifact(PACKAGES_JSON_FILENAME, {"packages": {}, "processing_order": None}) # Clear saved packages.json
             self.state_manager.set_packages({}) # Clear packages in state
             self.state_manager.set_package_processing_order(None) # Clear order in state
             if current_workflow_status == 'step2_complete':
@@ -194,7 +191,7 @@ class Step2Executor(StepExecutor):
                 node_weights = self._get_node_weights(list(dependency_graph.nodes()))
 
                 # 3. Cluster using the new dependency-based algorithm
-                max_package_tokens = self.config.get('MAX_PACKAGE_SIZE_TOKENS', global_config.MAX_PACKAGE_SIZE_TOKENS)
+                max_package_tokens = self.config.get('MAX_PACKAGE_SIZE_TOKENS', config.MAX_PACKAGE_SIZE_TOKENS)
                 final_partitions = cluster_files_by_dependency(
                     dependency_graph, node_weights, max_package_tokens
                 )
@@ -219,8 +216,8 @@ class Step2Executor(StepExecutor):
                         "total_tokens": package_total_tokens
                     }
                 # --- Save initial structure before starting descriptions ---
-                logger.info("Saving initial package structure via ContextManager...")
-                self.context_manager.save_packages_data(current_packages_data)
+                logger.info("Saving initial package structure via StateManager artifact...")
+                self.state_manager.save_artifact(PACKAGES_JSON_FILENAME, {"packages": current_packages_data, "processing_order": None})
 
             # --- Step 5: Get LLM Descriptions (runs whether resuming or not) ---
             final_packages_output = {} # This will accumulate results as we go
@@ -234,9 +231,9 @@ class Step2Executor(StepExecutor):
                 needs_save = False
                 for pkg_name, pkg_data in current_packages_data.items():
                     # Use the config constant name in the placeholder message
-                    invalid_descs = {None, "", "Error: Failed to generate description", f"N/A (LLM '{global_config.ANALYZER_MODEL}' not configured)", f"N/A (LLM '{global_config.ANALYZER_MODEL}' not available)"}
+                    invalid_descs = {None, "", "Error: Failed to generate description", f"N/A (LLM '{config.ANALYZER_MODEL}' not configured)", f"N/A (LLM '{config.ANALYZER_MODEL}' not available)"}
                     if pkg_data.get("description") in invalid_descs:
-                         pkg_data["description"] = f"N/A (LLM '{global_config.ANALYZER_MODEL}' not available)"
+                         pkg_data["description"] = f"N/A (LLM '{config.ANALYZER_MODEL}' not available)"
                          pkg_data["file_roles"] = [{"file_path": f, "role": "N/A"} for f in pkg_data.get("files", [])]
                          needs_save = True
                 # Use the potentially updated data as the final output in this case
@@ -253,7 +250,7 @@ class Step2Executor(StepExecutor):
                  max_retries = self.config.get("LLM_CALL_RETRIES", LLM_CALL_RETRIES)
 
                  # Determine token limit for description context
-                 llm_max_tokens = self.config.get("MAX_CONTEXT_TOKENS", global_config.MAX_CONTEXT_TOKENS)
+                 llm_max_tokens = self.config.get("MAX_CONTEXT_TOKENS", config.MAX_CONTEXT_TOKENS)
                  if llm_max_tokens is None:
                      llm_max_tokens = 200_000 # Hardcoded fallback
                      logger.warning(f"config.MAX_CONTEXT_TOKENS was None, using hardcoded default: {llm_max_tokens}")
@@ -280,7 +277,7 @@ class Step2Executor(StepExecutor):
                      # --- Check if description already exists ---
                      existing_desc = package_data.get("description")
                      # Use the config constant name in the placeholder message check
-                     invalid_descs = {None, "", "Error: Failed to generate description", f"N/A (LLM '{global_config.ANALYZER_MODEL}' not configured)", f"N/A (LLM '{global_config.ANALYZER_MODEL}' not available)"}
+                     invalid_descs = {None, "", "Error: Failed to generate description", f"N/A (LLM '{config.ANALYZER_MODEL}' not configured)", f"N/A (LLM '{config.ANALYZER_MODEL}' not available)"}
                      if existing_desc not in invalid_descs:
                           logger.info(f"Description already exists for {package_name}. Skipping LLM call.")
                           # Ensure it's included in final output
@@ -399,9 +396,11 @@ class Step2Executor(StepExecutor):
                          }
                      # <<< End of if/else block for processing details_json
 
-                     # --- Save intermediate state via ContextManager AFTER processing each package ---
-                     logger.debug(f"Saving intermediate package state via ContextManager after processing {package_name}...")
-                     self.context_manager.save_packages_data(current_packages_data)
+                     # --- Save intermediate state via StateManager artifact AFTER processing each package ---
+                     logger.debug(f"Saving intermediate package state via StateManager artifact after processing {package_name}...")
+                     # The processing_order is not yet finalized, so it's saved as None or its current state if available
+                     # For simplicity and consistency with other saves before order calculation, using None for processing_order here.
+                     self.state_manager.save_artifact(PACKAGES_JSON_FILENAME, {"packages": current_packages_data, "processing_order": None})
 
                      # --- Accumulate the result for the final state manager update ---
                      # This ensures final_packages_output reflects the latest saved state from the file
@@ -493,8 +492,9 @@ class Step2Executor(StepExecutor):
 
                                           logger.info(f"Applied {update_count} refined descriptions.")
                                           # Save the refined data immediately
-                                          logger.info("Saving updated package data with refined descriptions via ContextManager...")
-                                          self.context_manager.save_packages_data(final_packages_output)
+                                          logger.info("Saving updated package data with refined descriptions via StateManager artifact...")
+                                          # At this point, processing_order is still not calculated.
+                                          self.state_manager.save_artifact(PACKAGES_JSON_FILENAME, {"packages": final_packages_output, "processing_order": None})
                                       else:
                                           logger.error("Parsed refinement JSON has 'package_descriptions' but it's not a list.")
                                   else:
@@ -534,8 +534,8 @@ class Step2Executor(StepExecutor):
 
             # 7. Save Final State (Packages + Order) and Update State Manager
             # Save the final package data (potentially refined) along with the calculated order
-            logger.info("Saving final package data and processing order via ContextManager...")
-            self.context_manager.save_packages_data(final_packages_output, processing_order)
+            logger.info("Saving final package data and processing order via StateManager artifact...")
+            self.state_manager.save_artifact(PACKAGES_JSON_FILENAME, {"packages": final_packages_output, "processing_order": processing_order})
 
             # Update state manager with packages and order separately
             logger.info("Updating State Manager with final package data...")

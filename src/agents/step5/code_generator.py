@@ -22,6 +22,7 @@ def get_code_generator_agent(llm_instance: BaseLLM, tools: List[BaseTool]):
         goal=(
             f"Translate the provided C++ code elements (described in the task item and context) "
             f"into clean, idiomatic, and syntactically plausible {config.TARGET_LANGUAGE} code for Godot Engine 4.x. "
+            f"Ensure the generated code matches the output file type (gs, tres, tscn). "
             f"Focus purely on generating the code string based on the task requirements and context. "
             f"Adhere to SOLID principles and Godot best practices. "
             f"Use the '{tool_names[0] if tool_names else 'File Reader'}' tool if necessary to read related Godot files (e.g., base classes, resources) for context to ensure accurate translation. "
@@ -36,6 +37,7 @@ def get_code_generator_agent(llm_instance: BaseLLM, tools: List[BaseTool]):
         ),
         llm=llm_instance,
         verbose=True,
+        max_execution_time=config.VERTEX_TIMEOUT,
         allow_delegation=False, # Focus on generation and formatting
         tools=tools # Assign the provided tools (e.g., FileReaderTool)
     )

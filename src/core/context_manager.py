@@ -291,12 +291,20 @@ class ContextManager:
             godot_path_str = file_detail["path"]
             purpose = file_detail["purpose"]
             exists = False
+            absolute_path = None
             if godot_path_str.startswith("res://"):
                 relative_path = godot_path_str[len("res://"):]
                 absolute_path = self.godot_project_dir / relative_path
+            elif godot_path_str: # If it's not empty and doesn't start with res://
+                logger.info(f"Assuming '{godot_path_str}' is a relative path from project root for package '{package_id}'.")
+                absolute_path = self.godot_project_dir / godot_path_str
+            
+            if absolute_path:
                 exists = absolute_path.is_file()
+                if not exists:
+                    logger.debug(f"Target file '{godot_path_str}' (resolved to '{absolute_path}') does not exist.")
             else:
-                logger.warning(f"Target file path '{godot_path_str}' in structure for package '{package_id}' does not start with 'res://'. Cannot check existence.")
+                logger.warning(f"Could not resolve absolute path for target file '{godot_path_str}' in package '{package_id}'.")
 
             target_files.append({
                 "path": godot_path_str,
@@ -441,9 +449,10 @@ class ContextManager:
             if rel_path in processed_paths: continue
             abs_path_obj = self.cpp_source_dir / rel_path
             abs_path_str = str(abs_path_obj)
+            logger.debug(f"Attempting to read C++ file: base_dir='{self.cpp_source_dir}', rel_path='{rel_path}', constructed_abs_path='{abs_path_str}'")
 
             if not abs_path_obj.exists():
-                logger.warning(f"File not found: {abs_path_str}")
+                logger.warning(f"File not found at constructed path: {abs_path_str}")
                 processed_paths.add(rel_path)
                 continue
 
@@ -471,181 +480,3 @@ class ContextManager:
 
         logger.debug(f"Internal: Finished retrieving C++ content. {len(content_map)} files added. Total tokens: {current_tokens}")
         return content_map
-
-
-    # --- Deprecated / To Be Removed Methods ---
-
-    # Note: _load_packages_data is now effectively handled by StateManager loading artifacts.
-    # Keeping the first definition commented out for reference during transition if needed.
-    # def _load_packages_data(self) -> Tuple[Dict[str, Any], Optional[List[str]]]:
-    #     """
-    #     Loads the packages data and processing order from the JSON file.
-    #     Returns a tuple: (packages_dict, processing_order_list | None).
-    #     """
-    #     if not os.path.exists(self.include_graph_path):
-    #          logger.error(f"Include graph file not found: {self.include_graph_path}")
-    #          return {}
-    #     try:
-    #         with open(self.include_graph_path, 'r', encoding='utf-8') as f:
-    #             graph = json.load(f)
-    #         logger.info(f"Successfully loaded include graph from: {self.include_graph_path}")
-    #         # Basic validation: check if it's a dictionary
-    #         if not isinstance(graph, dict):
-    #             logger.error(f"Include graph file is not a valid JSON dictionary: {self.include_graph_path}")
-    #             return {}
-    #         return graph
-    #     except json.JSONDecodeError:
-    #         logger.error(f"Error decoding JSON from include graph file: {self.include_graph_path}")
-    #         return {}
-    #     except Exception as e:
-    #         logger.error(f"Failed to load include graph: {e}", exc_info=True)
-    #         return {}
-
-
-    # Removing the second (duplicate/old) _load_packages_data method and save_packages_data
-    # def save_packages_data(...): # Now handled by StateManager saving artifacts
-
-    # def get_package_order(self) -> Optional[List[str]]: # Now handled by StateManager
-    #     """Returns the loaded package processing order, if available."""
-    #     return
-
-    # def get_all_package_summaries(self) -> Dict[str, Dict[str, Any]]: # Now handled by StateManager + Executor formatting
-    #     """
-    #     Retrieves a summary (description, files) for all packages.
-    #     Reloads data from file to ensure freshness.
-    #     """
-    #     # This logic is now redundant as StateManager holds the data
-    #     # and formatting should happen in the executor.
-    #     logger.warning("DEPRECATED: ContextManager.get_all_package_summaries called.")
-    #     return {} # Return empty dict as it's deprecated
-
-    # def get_existing_structure(self, package_id: str) -> Optional[Dict[str, Any]]: # Now handled by StateManager loading artifact
-    #     """
-    #     Loads the existing Godot structure JSON for a specific package, if it exists.
-    #     """
-    #     logger.warning("DEPRECATED: ContextManager.get_existing_structure called.")
-    #     # Delegate to StateManager loading
-    #     structure_filename = f"package_{package_id}{STRUCTURE_ARTIFACT_SUFFIX}"
-    #     return self.state_manager.load_artifact(structure_filename, expect_json=True)
-
-    # def get_all_existing_godot_files(self) -> Dict[str, List[str]]: # Now handled by StateManager loading artifacts
-    #     """
-    #     Scans the analysis directory for all package_*.structure.json files
-    #     and compiles a dictionary mapping package IDs to their defined Godot scenes and scripts.
-    #     """
-    #     logger.warning("DEPRECATED: ContextManager.get_all_existing_godot_files called.")
-    #     # This should be derived from StateManager data or artifacts
-    #     return {} # Return empty dict as it's deprecated
-
-    # def get_globally_defined_godot_files_from_state(self) -> List[str]: # Now handled by StateManager
-    #     """
-    #     Retrieves a unique list of all Godot file paths defined in the 'defined_godot_files'
-    #     artifact for packages that have successfully completed Step 3 or later.
-    #     """
-    #     logger.warning("DEPRECATED: ContextManager.get_globally_defined_godot_files_from_state called.")
-    #     # This logic should reside within StateManager or be assembled by the executor
-    #     return [] # Return empty list as it's deprecated
-
-    # def get_existing_godot_output_files(self, godot_project_dir: str) -> List[str]: # Logic moved to get_target_file_list check
-    #     """
-    #     Scans the actual Godot project output directory for existing relevant files.
-    #
-    #     Args:
-    #         godot_project_dir (str): The absolute path to the Godot project directory.
-    #
-    #     Returns:
-    #         List[str]: A list of relative paths (from godot_project_dir) of existing
-    #                    .gd, .tscn, .tres, .shader, .py files.
-    #     """
-    #     logger.warning("DEPRECATED: ContextManager.get_existing_godot_output_files called.")
-    #     # This logic is partially covered by get_target_file_list
-    #     return [] # Return empty list as it's deprecated
-
-    # def read_godot_file_content(self, godot_project_dir: str, file_path: str) -> str | None: # Now a top-level utility
-    #     """
-    #     Reads content from a Godot file (.gd, .tscn, .tres), handling encoding issues,
-    #     and removing comments (#) and blank lines. Delegates to the utility function.
-    #
-    #     Args:
-    #         file_path (str): Absolute or relative path to the Godot file.
-    #                          If relative, it's assumed relative to the CWD or needs context.
-    #                          It's safer to pass absolute paths or paths relative to godot_project_dir.
-    #
-    #     Returns:
-    #         str | None: The cleaned content or None if reading fails.
-    #     """
-    #     logger.warning("DEPRECATED: ContextManager.read_godot_file_content called.")
-    #     # Use the top-level utility function directly
-    #     # Determine absolute path correctly if needed
-    #     abs_path = Path(file_path)
-    #     if not abs_path.is_absolute():
-    #          # Assuming file_path is relative to godot_project_dir if not absolute
-    #          abs_path = Path(godot_project_dir) / file_path
-    #     return read_godot_file_content(str(abs_path))
-
-
-    # def _get_contextual_content(self, # Replaced by _get_cpp_content_for_paths and logic within get_work_package_target_code_content
-    #                             relative_paths: list[str],
-    #                             max_tokens: int):
-    #     """
-    #     Retrieves full content for specified files, respecting token limits.
-    #     Args:
-    #         relative_paths (list[str]): Files needing full content.
-    #         max_tokens (int): The approximate maximum tokens allowed for the combined content.
-    #
-    #     Returns:
-    #         dict: A dictionary mapping relative paths to their full content.
-    #               Stops adding files if max_tokens is exceeded.
-    #     """
-    #     logger.warning("DEPRECATED: ContextManager._get_contextual_content called.")
-    #     return {} # Return empty dict as it's deprecated
-
-    # def _assemble_context_block(self, file_content_map: dict, other_context: dict, max_total_tokens: int) -> str: # Now handled by Executors
-    #     """
-    #     Assembles context from file contents and other provided context items
-    #     into a single string using Markdown formatting, respecting token limits.
-    #     Prioritizes 'other_context' first, then file contents.
-    #
-    #     Args:
-    #         file_content_map (dict): Dictionary mapping relative file paths to their full content.
-    #         other_context (dict): Dictionary of other context items (e.g., task descriptions, JSON data).
-    #         max_total_tokens (int): The overall token limit for the final context string.
-    #
-    #     Returns:
-    #         str: The assembled context string formatted with Markdown.
-    #     """
-    #     logger.warning("DEPRECATED: ContextManager._assemble_context_block called.")
-    #     return "" # Return empty string as it's deprecated
-
-    # def _get_dependencies_for_package(self, package_relative_paths: list[str]) -> list[str]: # Logic might move or be adapted in Executors
-    #     """
-    #     Finds direct dependencies for a list of package files using the include graph.
-    #
-    #     Args:
-    #         package_relative_paths (list[str]): List of relative file paths belonging to the package.
-    #
-    #     Returns:
-    #         list[str]: A list of unique relative paths of files directly included by the package files,
-    #                    excluding the package files themselves and ensuring they are within the project.
-    #     """
-    #     logger.warning("DEPRECATED: ContextManager._get_dependencies_for_package called.")
-    #     # This logic might be needed by executors, but doesn't belong solely in ContextManager anymore
-    #     return [] # Return empty list as it's deprecated
-
-    # --- Method for assembling context for specific steps ---
-
-    # def get_context_for_step(self, step_name: str, **kwargs) -> str: # DEPRECATED
-    #     """
-    #     Assembles context for a given workflow step, retrieving full content for all specified files.
-    #
-    #     Args:
-    #         step_name (str): Identifier for the workflow step (e.g., "STRUCTURE_DEFINITION").
-    #         primary_relative_paths (list[str]): List of primary file paths for the step.
-    #         dependency_relative_paths (list[str]): List of dependency file paths for the step.
-    #         **kwargs: Additional context items (e.g., 'task_description', 'work_package_info').
-    #
-    #     Returns:
-    #         str: The assembled context string formatted with Markdown, or empty string on error.
-    #     """
-    #     logger.warning(f"DEPRECATED: ContextManager.get_context_for_step called for step '{step_name}'.")
-    #     return "" # Return empty string as it's deprecated

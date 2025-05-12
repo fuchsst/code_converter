@@ -27,7 +27,7 @@ from src.tasks.step3.define_structure import create_hierarchical_define_structur
 # Import utilities
 from src.utils.json_utils import parse_json_from_string
 from src.logger_setup import get_logger
-import src.config as global_config
+import src.config as config
 
 
 logger = get_logger(__name__)
@@ -194,7 +194,26 @@ class Step3Executor(StepExecutor):
         # --- Process packages iteratively, saving state after each ---
         for pkg_id in packages_to_process_this_run:
             logger.info(f"Processing Step 3 for package: {pkg_id}")
-            self.state_manager.update_package_state(pkg_id, status='running_structure')
+
+            # --- Pre-run status updates ---
+            pkg_info_at_start_of_execute = all_packages.get(pkg_id, {}) # Use the initial snapshot
+            original_status_for_logic = pkg_info_at_start_of_execute.get('status')
+
+            if force and (original_status_for_logic.startswith(failed_status_prefix) or \
+                           original_status_for_logic == completed_status):
+                logger.info(f"Forcing package {pkg_id} (original status: {original_status_for_logic}): Resetting status to '{target_status}' and clearing error.")
+                self.state_manager.update_package_state(pkg_id, target_status, error=None)
+            elif not force and original_status_for_logic.startswith(failed_status_prefix): # Auto-retry failed
+                logger.info(f"Auto-retrying failed package {pkg_id} (original status: {original_status_for_logic}): Clearing error.")
+                # Keep original 'failed_structure...' status but clear the error message for a fresh attempt.
+                # The 'running_structure' status will be set next.
+                self.state_manager.update_package_state(pkg_id, original_status_for_logic, error=None)
+            elif original_status_for_logic == running_status: # Resuming a 'running' package
+                logger.info(f"Resuming package {pkg_id} (original status: {original_status_for_logic}).")
+                # Ensure error is cleared if it was somehow set during a crash
+                self.state_manager.update_package_state(pkg_id, original_status_for_logic, error=None)
+            
+            self.state_manager.update_package_state(pkg_id, status='running_structure') # Set to current running status
 
             try:
                 pkg_info = self.state_manager.get_package_info(pkg_id)
@@ -222,7 +241,7 @@ class Step3Executor(StepExecutor):
                 # Calculate remaining token budget for source code
                 temp_context_so_far = "\n\n".join(context_parts)
                 tokens_so_far = count_tokens(temp_context_so_far) + count_tokens(instr_context) # Include instruction tokens
-                max_source_tokens = (global_config.MAX_CONTEXT_TOKENS - global_config.PROMPT_TOKEN_BUFFER) - tokens_so_far - 1000 # Extra buffer
+                max_source_tokens = (config.MAX_CONTEXT_TOKENS - config.PROMPT_TOKEN_BUFFER) - tokens_so_far - 1000 # Extra buffer
                 if max_source_tokens > 0:
                     source_code = self.context_manager.get_work_package_source_code_content(pkg_id, max_tokens=max_source_tokens)
                     if source_code:
@@ -263,7 +282,7 @@ class Step3Executor(StepExecutor):
                 context_str = "\n\n---\n\n".join(context_parts)
                 final_tokens = count_tokens(context_str) + count_tokens(instr_context) # Add instruction tokens for logging
                 logger.info(f"Assembled context for Step 3 - {pkg_id} ({final_tokens} tokens).")
-                if final_tokens >= (global_config.MAX_CONTEXT_TOKENS - global_config.PROMPT_TOKEN_BUFFER):
+                if final_tokens >= (config.MAX_CONTEXT_TOKENS - config.PROMPT_TOKEN_BUFFER):
                      logger.warning(f"Context for {pkg_id} might be near or exceeding token limits!")
 
                 if not context_str: # Should not happen if basic info exists, but check
@@ -286,9 +305,9 @@ class Step3Executor(StepExecutor):
                 if vertex_project_id and vertex_location:
                     logger.info("Configuring embedder for Vertex AI.")
                     embedder_config = {"provider": "vertexai", "config": {"project_id": vertex_project_id, "location": vertex_location}}
-                elif global_config.GEMINI_API_KEY:
+                elif config.GEMINI_API_KEY:
                     logger.info("Configuring embedder for Google Generative AI.")
-                    embedder_config = {"provider": "google", "config": {"api_key": global_config.GEMINI_API_KEY}}
+                    embedder_config = {"provider": "google", "config": {"api_key": config.GEMINI_API_KEY}}
                 else:
                     logger.warning("Neither Vertex AI env vars nor GEMINI_API_KEY found. Attempting Vertex AI with ADC.")
                     embedder_config = {"provider": "vertexai", "config": {}}

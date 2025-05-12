@@ -36,6 +36,7 @@ def get_task_decomposer_agent(llm_instance: BaseLLM):
         ),
         llm=llm_instance,
         verbose=True,
+        max_execution_time=config.VERTEX_TIMEOUT,
         allow_delegation=False, # Focuses on the decomposition task
         tools=[] # This agent structures information, doesn't use external tools.
     )

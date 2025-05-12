@@ -13,7 +13,7 @@ except ImportError:
 
 from crewai.llms.base_llm import BaseLLM
 from src.logger_setup import get_logger
-import src.config as global_config # For defaults like timeout, max_tokens
+import src.config as config # For defaults like timeout, max_tokens
 
 logger = get_logger(__name__)
 
@@ -57,8 +57,9 @@ class LiteLLMGeminiLLM(BaseLLM):
         # Store parameters using litellm standard names where applicable
         self.temperature = temperature
         self.top_p = top_p
-        self.max_tokens = max_tokens if max_tokens is not None else global_config.MAX_OUTPUT_TOKENS
-        self.stop_sequences = stop
+        self.max_tokens = max_tokens if max_tokens is not None else config.MAX_OUTPUT_TOKENS
+        self.stop_sequences = stop # Will be None if 'stop' not in kwargs to __init__
+        self.stop = None # Explicitly set self.stop to None to override potential superclass defaults
         self.response_format = response_format
         self.safety_settings = safety_settings
 

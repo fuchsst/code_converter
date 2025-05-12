@@ -57,12 +57,12 @@ BACKOFF_JITTER = float(os.getenv("BACKOFF_JITTER", 0.1)) # Max jitter fraction (
 
 # --- Gemini Specific Settings ---
 # Timeout for Google Gemini API calls in seconds
-default_gemini_timeout = 60*10 # 10 minutes
+default_gemini_timeout = 60*15 # 15 minutes
 try:
-    GEMINI_TIMEOUT = int(os.getenv("GEMINI_TIMEOUT", default_gemini_timeout))
+    VERTEX_TIMEOUT = int(os.getenv("VERTEX_TIMEOUT", default_gemini_timeout))
 except ValueError:
-    logger.warning(f"Invalid GEMINI_TIMEOUT value '{os.getenv('GEMINI_TIMEOUT')}'. Using default: {default_gemini_timeout}s")
-    GEMINI_TIMEOUT = default_gemini_timeout
+    logger.warning(f"Invalid GEMINI_TIMEOUT value '{os.getenv('VERTEX_TIMEOUT')}'. Using default: {default_gemini_timeout}s")
+    VERTEX_TIMEOUT = default_gemini_timeout
 
 
 # --- Conversion Settings ---
@@ -93,7 +93,7 @@ CONTEXT_FILE_BUDGET_RATIO = float(os.getenv("CONTEXT_FILE_BUDGET_RATIO", 0.9)) #
 
 # --- Package Identification Settings (Step 2) ---
 # Max estimated tokens for a single package's content/interface (used for splitting large clusters)
-MAX_PACKAGE_SIZE_TOKENS = int(os.getenv("MAX_PACKAGE_SIZE_TOKENS", 50_000))
+MAX_PACKAGE_SIZE_TOKENS = int(os.getenv("MAX_PACKAGE_SIZE_TOKENS", 20_000))
 # Minimum number of files for a cluster to be considered a valid final package
 MIN_PACKAGE_SIZE_FILES = int(os.getenv("MIN_PACKAGE_SIZE_FILES", 3))
 # Ratio of LLM's context window to use for description/evaluation calls

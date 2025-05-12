@@ -28,52 +28,43 @@ class RemappingAdvice(BaseModel):
     reason: Optional[str] = Field(description="Explanation for the recommendation.")
     feedback: Optional[str] = Field(description="Detailed feedback for Step 4 if remapping is recommended.")
 
-class CodeGenerationResult(BaseModel):
-    """Represents the structured output from the CodeGeneratorAgent."""
-    generated_code: str = Field(..., description="The generated Godot code string.")
-    output_format: Literal['FULL_FILE', 'CODE_BLOCK'] = Field(..., description="Indicates if the code is for a full file or a replacement block.")
-    search_block: Optional[str] = Field(None, description="The exact code block to search for if output_format is 'CODE_BLOCK'.")
-
-# NOTE: This model might be simplified or deprecated if CodeGeneratorAgent's output changes.
-
-class FileOutputParameters(BaseModel):
-    """Represents the parameters needed for a file operation (write/replace)."""
-    output_format: Literal['FULL_FILE', 'CODE_BLOCK'] = Field(..., description="Indicates if the code is for a full file or a replacement block.")
-    search_block: Optional[str] = Field(None, description="The exact code block to search for if output_format is 'CODE_BLOCK'.")
 
 
 def create_analyze_package_failures_task(
                     advisor_agent: Agent,
-                    all_item_results_context: List[Task], # Context comes from previous item tasks
+                    item_processing_results: List[Dict[str, Any]],
                     instructions: Optional[str] = None) -> Task:
     """
     Creates the CrewAI Task for analyzing package failures.
 
     Args:
         advisor_agent (Agent): The RemappingAdvisorAgent instance.
-        all_item_results_context (List[Task]): A list containing the Task objects for all
-                                               processed items in the package. Their outputs
-                                               (TaskItemProcessingResult JSON) will form the context.
+        item_processing_results (List[Dict[str, Any]]): A list of dictionaries, where each dictionary
+                                                        is a TaskItemProcessingResult.
         instructions (Optional[str]): General instructions to prepend to the task description.
 
     Returns:
         Task: The CrewAI Task object assigned to the RemappingAdvisorAgent.
     """
-    logger.info(f"Creating AnalyzePackageFailuresTask for agent: {advisor_agent.role}")
+    logger.info(f"Creating AnalyzePackageFailuresTask for agent: {advisor_agent.role} with {len(item_processing_results)} item results.")
 
     # Prepare the full description, prepending instructions if available
     full_description = ""
     if instructions:
         full_description += f"**General Instructions:**\n{instructions}\n\n---\n\n"
 
+    # Embed the item results directly into the description for the agent to parse
+    # The agent's goal will need to be updated to expect this format.
+    results_json_str = json.dumps(item_processing_results, indent=2)
     full_description += (
-        "Analyze the results of all processed task items for this work package, provided in the context. "
-        "The context contains a list of JSON outputs (TaskItemProcessingResult) from the processing of each individual task item.\n\n"
-        "1.  Identify all task items with a final status of 'failed'.\n"
-        "2.  Extract the relevant details for these failed tasks (task_id, error messages, etc.).\n"
-        "3.  Use the 'Remapping Logic Analyzer' tool, passing the extracted list of failed task details to it.\n"
-        "4.  Based *only* on the output received from the 'Remapping Logic Analyzer' tool, formulate your final response.\n"
-        "5.  Structure your final output as a JSON object conforming to the RemappingAdvice model, containing `recommend_remapping` (boolean), `reason` (string), and `feedback` (string)."
+        f"Analyze the following results of all processed task items for this work package:\n\n"
+        f"**Processed Task Item Results:**\n```json\n{results_json_str}\n```\n\n"
+        f"**Your Analysis Steps:**\n"
+        f"1.  From the 'Processed Task Item Results' above, identify all task items with a final status of 'failed'.\n"
+        f"2.  Extract the relevant details for these failed tasks (task_id, error_message, target_godot_file, target_element etc.).\n"
+        f"3.  Use your 'Remapping Logic Analyzer' tool. Pass the extracted list of failed task details (as a list of dictionaries) to this tool.\n"
+        f"4.  Based *only* on the output received from the 'Remapping Logic Analyzer' tool, formulate your final response.\n"
+        f"5.  Structure your final output as a JSON object conforming to the RemappingAdvice model, containing `recommend_remapping` (boolean), `reason` (string), and `feedback` (string)."
     )
 
     return Task(
@@ -83,6 +74,5 @@ def create_analyze_package_failures_task(
             "the reason, and detailed feedback if applicable."
         ),
         agent=advisor_agent,
-        context=all_item_results_context,
         output_pydantic=RemappingAdvice
     )

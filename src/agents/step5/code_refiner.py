@@ -37,6 +37,7 @@ def get_code_refinement_agent(llm_instance: BaseLLM, tools: List[BaseTool]):
         ),
         llm=llm_instance,
         verbose=True,
+        max_execution_time=config.VERTEX_TIMEOUT,
         allow_delegation=False,
         tools=tools
     )

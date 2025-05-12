@@ -1,6 +1,7 @@
 # src/agents/godot_structure_analyst.py
 from crewai import Agent, BaseLLM
 from src.logger_setup import get_logger
+import src.config as config
 
 logger = get_logger(__name__)
 
@@ -25,6 +26,7 @@ def get_godot_structure_analyst_agent(llm_instance: BaseLLM):
         ),
         llm=llm_instance,
         verbose=True,
+        max_execution_time=config.VERTEX_TIMEOUT,
         allow_delegation=False,
         tools=[] # This agent analyzes context, doesn't use external tools.
     )

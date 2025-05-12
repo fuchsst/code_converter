@@ -20,10 +20,11 @@ def get_remapping_advisor_agent(llm_instance: BaseLLM, tools: List[BaseTool]):
     return Agent(
         role="Code Conversion Failure Analyst",
         goal=(
-            f"Analyze the summary of failed tasks provided for a specific work package. "
-            f"Use the '{tools[0].name if tools else 'Remapping Logic Analyzer'}' tool, passing it the necessary failure details from the context. "
-            f"Based *only* on the tool's output (which indicates if remapping is advised), formulate a final response. "
-            f"The response should clearly state whether remapping is recommended for the package and include the reason provided by the tool."
+            f"Your task is to analyze a list of failed task item results (provided in your task description) for a work package. "
+            f"1. Extract the list of failed task item dictionaries from your task description. "
+            f"2. Use your '{tool_names[0] if tool_names else 'Remapping Logic Analyzer'}' tool, passing this list as the 'failed_tasks' argument. "
+            f"3. Your final output **MUST BE the exact JSON string returned by this tool.** This JSON string will conform to the `RemappingAdvice` model. "
+            f"Do not add any extra text, explanations, or markdown formatting around the JSON string."
         ),
         backstory=(
             f"You are an analytical agent specializing in diagnosing issues in automated code conversion pipelines. "
@@ -34,6 +35,7 @@ def get_remapping_advisor_agent(llm_instance: BaseLLM, tools: List[BaseTool]):
         ),
         llm=llm_instance,
         verbose=True,
+        max_execution_time=config.VERTEX_TIMEOUT,
         allow_delegation=False,
         tools=tools # Assign the remapping logic tool(s)
     )

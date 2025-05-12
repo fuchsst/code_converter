@@ -7,7 +7,7 @@ import statistics
 from collections import defaultdict
 
 from src.logger_setup import get_logger
-import src.config as global_config # For default thresholds
+import src.config as config # For default thresholds
 
 logger = get_logger(__name__)
 
@@ -74,8 +74,8 @@ def refine_partitions_for_balance(
         return {}
 
     max_iterations = config.get('BALANCE_MAX_ITERATIONS', 100)
-    max_package_tokens = config.get('MAX_PACKAGE_SIZE_TOKENS', global_config.MAX_PACKAGE_SIZE_TOKENS)
-    min_package_files = config.get('MIN_PACKAGE_SIZE_FILES', global_config.MIN_PACKAGE_SIZE_FILES)
+    max_package_tokens = config.get('MAX_PACKAGE_SIZE_TOKENS', config.MAX_PACKAGE_SIZE_TOKENS)
+    min_package_files = config.get('MIN_PACKAGE_SIZE_FILES', config.MIN_PACKAGE_SIZE_FILES)
     move_strategy = config.get('BALANCE_MOVE_STRATEGY', 'best_fit') # 'random' or 'best_fit'
     random_seed = config.get('BALANCE_RANDOM_STATE', None)
     if random_seed is not None:

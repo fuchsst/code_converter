@@ -8,15 +8,15 @@ from .state_manager import StateManager
 from .context_manager import ContextManager
 from .tool_interfaces import IFileWriter, IFileReplacer, IFileReader, ISyntaxValidator
 from src.logger_setup import get_logger
-import src.config as global_config # Import config for GEMINI_TIMEOUT
+import src.config as config # Import config for GEMINI_TIMEOUT
 
 # Import LLM classes needed for instantiation check/logic
 # Use try-except for robustness if imports might fail in some environments
-try:
-    # Import the new LiteLLM wrapper
-    from src.llms.litellm_gemini_llm import LiteLLMGeminiLLM
-except ImportError:
-    LiteLLMGeminiLLM = None # Define as None if import fails
+#try:
+#    # Import the new LiteLLM wrapper
+#    from src.llms.litellm_gemini_llm import LiteLLMGeminiLLM
+#except ImportError:
+#    LiteLLMGeminiLLM = None # Define as None if import fails
 try:
     from crewai import LLM as CrewAI_LLM
 except ImportError:
@@ -162,40 +162,8 @@ class StepExecutor(ABC):
              model_identifier = llm_config.get("model", "[Unknown Model]")
              logger.debug(f"Attempting to instantiate LLM for '{config_key_name}' using model '{model_identifier}' with config: {llm_config}")
 
-             # Prioritize LiteLLM wrapper for Gemini models if available
-             if LiteLLMGeminiLLM and model_identifier.startswith(("gemini/", "google/")):
-                 llm_config_copy = llm_config.copy()
-                 # Ensure standard litellm params are used if available in config
-                 llm_config_copy.setdefault('timeout', global_config.GEMINI_TIMEOUT) # LiteLLM uses 'timeout'
-                 llm_config_copy.setdefault('max_tokens', global_config.MAX_OUTPUT_TOKENS) # LiteLLM uses 'max_tokens'
-
-                 # Handle response schema for LiteLLM (usually via response_format)
-                 if response_schema_class:
-                     logger.info(f"Applying response schema '{response_schema_class.__name__}' via response_format for LiteLLM instance (config key '{config_key_name}').")
-                     # Standard way to request JSON output in LiteLLM/OpenAI spec
-                     llm_config_copy.setdefault('response_format', {"type": "json_object"})
-                     # Note: LiteLLM's Gemini integration might support more specific schema passing,
-                     # check LiteLLM docs if direct Pydantic schema injection is needed/supported.
-
-                 # Remove params not expected by LiteLLMGeminiLLM init if necessary
-                 # (e.g., 'maxOutputTokens' if only 'max_tokens' is used)
-                 llm_config_copy.pop('maxOutputTokens', None)
-                 llm_config_copy.pop('response_schema', None) # Handled by response_format
-
-                 llm_instance = LiteLLMGeminiLLM(**llm_config_copy)
-                 logger.info(f"Successfully instantiated LiteLLMGeminiLLM for '{config_key_name}': {model_identifier}")
-
-             # Fallback to default CrewAI LLM for non-Gemini models
-             elif CrewAI_LLM:
-                 logger.debug(f"Model '{model_identifier}' is not Gemini. Using default CrewAI LLM for '{config_key_name}'.")
-                 # Pass the config directly, assuming it's compatible with CrewAI's base LLM or other wrappers it might use
-                 llm_instance = CrewAI_LLM(**llm_config)
-                 logger.info(f"Successfully instantiated default crewai.LLM for '{config_key_name}': {model_identifier}")
-
-             else:
-                 logger.error(f"Could not instantiate LLM for '{config_key_name}'. No suitable LLM classes available (LiteLLMGeminiLLM, CrewAI_LLM).")
-                 return None
-
+             llm_instance = CrewAI_LLM(**llm_config)
+             logger.info(f"Successfully instantiated default crewai.LLM for '{config_key_name}': {model_identifier}")
              return llm_instance # Return the instantiated object
 
          except ImportError as ie: # Should be caught by initial checks, but keep for safety

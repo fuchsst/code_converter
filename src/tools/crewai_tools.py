@@ -5,10 +5,12 @@ from pydantic import BaseModel, Field
 import src.config as config
 import os
 
-from .framework_tools_wrapper import CrewAIFileWriter, CrewAIFileReader, CustomFileReplacer
-from .remapping_logic import RemappingLogic
-from ..core.tool_interfaces import IFileWriter, IFileReader, IFileReplacer
+from src.tools.godot_validator_tool import validate_godot_project
+from src.tools.framework_tools_wrapper import CrewAIFileWriter, CrewAIFileReader, CustomFileReplacer
+from src.tools.remapping_logic import RemappingLogic
+from src.core.tool_interfaces import IFileWriter, IFileReader, IFileReplacer
 from src.logger_setup import get_logger
+from src.tasks.step5.process_code import RemappingAdvice
 
 logger = get_logger(__name__)
 
@@ -120,15 +122,12 @@ class GodotProjectValidatorTool(BaseTool):
                         "Requires 'godot_project_path' and 'target_file_path' (e.g., 'res://path/to/file.gd'). "
                         "Primarily checks script integrity; scene/resource load errors might also be caught.")
     args_schema: Type[BaseModel] = ProjectValidationInput
-    # We don't need the ISyntaxValidator interface wrapper anymore, call the function directly
-    # from the underlying module.
-    from .godot_validator_tool import validate_godot_project # Import directly
 
     def _run(self, godot_project_path: str, target_file_path: str) -> str:
         logger.debug(f"GodotProjectValidatorTool executing for project: {godot_project_path}, target_file: {target_file_path}")
         try:
-            # Directly call the updated validation function
-            result = self.validate_godot_project(godot_project_path=godot_project_path)
+            # Call as a static/module function, not a method of self
+            result = validate_godot_project(godot_project_path=godot_project_path)
             status = result.get('status', 'failure')
             errors = result.get('errors') # This is the full stderr output on failure
 
@@ -172,23 +171,54 @@ class RemappingLogicTool(BaseTool):
     description: str = ("Analyzes a list of failed task reports for a work package to determine if remapping (re-running Step 4) is advisable. "
                         "Requires 'failed_tasks' (a list of dictionaries).")
     args_schema: Type[BaseModel] = RemappingCheckInput
+    # remapping_logic class attribute will be used if we need to instantiate RemappingLogic
+    # For now, we are calling static methods, so it's not strictly used but good for consistency.
+    remapping_logic_class: Type[RemappingLogic] = RemappingLogic 
 
     def _run(self, failed_tasks: List[Dict[str, Any]]) -> str:
         logger.debug(f"RemappingLogicTool executing with {len(failed_tasks)} failed tasks.")
         try:
-            # Directly call static methods on the imported RemappingLogic class
-            should_remap = RemappingLogic.should_remap_package(failed_tasks=failed_tasks)
-            if should_remap:
-                # Optionally generate feedback here too, or let the agent do it based on this output
-                feedback = RemappingLogic.generate_mapping_feedback(failed_tasks)
-                logger.info("RemappingLogicTool determined remapping IS recommended.")
-                return f"Remapping Recommended: Yes. Reason: Failure patterns suggest mapping issues.\nFeedback:\n{feedback}"
+            should_remap_bool = self.remapping_logic_class.should_remap_package(failed_tasks=failed_tasks)
+            
+            reason_str = ""
+            feedback_str = ""
+
+            if should_remap_bool:
+                feedback_str = self.remapping_logic_class.generate_mapping_feedback(failed_tasks)
+                # Determine a more specific reason based on feedback content if possible
+                if "High search block failure rate" in feedback_str:
+                    reason_str = "High rate of search block related failures."
+                elif "High validation failure rate" in feedback_str:
+                    reason_str = "High rate of code validation failures."
+                elif "CodeGen returned empty or non-string result" in feedback_str or "S1:" in feedback_str: # Check for S1 type errors
+                    reason_str = "Systemic code generation failures detected."
+                else:
+                    reason_str = "Analysis of failure patterns suggests mapping issues."
+                logger.info(f"RemappingLogicTool determined remapping IS recommended. Reason: {reason_str}")
             else:
+                reason_str = "Failure patterns do not strongly indicate a systemic mapping issue requiring remapping."
+                feedback_str = "No specific feedback for remapping; individual errors should be addressed if possible, or the issues are not related to mapping."
                 logger.info("RemappingLogicTool determined remapping is NOT recommended.")
-                return "Remapping Recommended: No. Failure patterns do not strongly indicate a need for remapping."
+
+            # Import RemappingAdvice here or ensure it's available in the scope
+            # For simplicity, assuming it's imported where this tool is defined (e.g., at the top of crewai_tools.py)
+            # from src.tasks.step5.process_code import RemappingAdvice # Ensure this import exists at module level
+
+            advice = RemappingAdvice(
+                recommend_remapping=should_remap_bool,
+                reason=reason_str,
+                feedback=feedback_str
+            )
+            return advice.model_dump_json()
         except Exception as e:
             logger.error(f"Error during RemappingLogicTool execution: {e}", exc_info=True)
-            return f"Remapping Recommended: Error. Failed to analyze failures: {e}"
+            # Return a JSON string indicating error, conforming to RemappingAdvice structure if possible
+            error_advice = RemappingAdvice(
+                recommend_remapping=False, # Default to false on error
+                reason=f"Error during remapping analysis: {e}",
+                feedback="An internal error occurred while trying to determine remapping advice."
+            )
+            return error_advice.model_dump_json()
 
 # Example of how to instantiate (likely done in Step5Executor)
 # file_writer_tool = FileWriterTool()

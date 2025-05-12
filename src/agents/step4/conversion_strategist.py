@@ -30,6 +30,7 @@ def get_conversation_strategist_agent(llm_instance: BaseLLM):
         ),
         llm=llm_instance,
         verbose=True,
+        max_execution_time=config.VERTEX_TIMEOUT,
         allow_delegation=False, # Focuses on synthesizing the strategy
         tools=[] # This agent synthesizes information, doesn't use external tools.
     )

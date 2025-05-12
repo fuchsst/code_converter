@@ -3,6 +3,7 @@ from crewai import Agent, BaseLLM
 from src.logger_setup import get_logger
 # Import the Pydantic model for reference in goal/backstory
 from src.tasks.step4.define_mapping import MappingOutput
+import src.config as config
 
 logger = get_logger(__name__)
 
@@ -43,6 +44,7 @@ def get_json_output_fomratter_agent(llm_instance: BaseLLM):
         ),
         llm=llm_instance,
         verbose=True,
+        max_execution_time=config.VERTEX_TIMEOUT,
         allow_delegation=False,
         # output_json=True, # This might be set on the Task instead
         # output_pydantic=MappingOutput, # This might be set on the Task instead

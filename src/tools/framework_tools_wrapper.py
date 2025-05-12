@@ -1,5 +1,6 @@
 # src/tools/framework_tools_wrapper.py
 import os
+from pathlib import Path
 import re
 from typing import Any, Dict
 # Import the interfaces these wrappers will implement
@@ -13,30 +14,24 @@ logger = get_logger(__name__)
 # --- Concrete Tool Wrappers ---
 
 class CrewAIFileWriter(IFileWriter):
-    """Implements IFileWriter using crewai_tools.FileWriteTool."""
+    """Implements IFileWriter."""
     def __init__(self):
-        # Instantiate the CrewAI tool internally
-        # Note: FileWriteTool takes directory and filename separately in its _run method.
-        self._tool = FileWriterTool()
-        logger.debug("Initialized CrewAIFileWriter using crewai_tools.FileWriterTool")
+        logger.debug("Initialized CrewAIFileWriter (direct I/O).")
 
     def write(self, path: str, content: str) -> Dict[str, Any]:
-        logger.debug(f"CrewAIFileWriter: Writing to path='{path}'")
+        logger.debug(f"CrewAIFileWriter (direct I/O): Writing to path='{path}'")
         try:
-            # Separate directory and filename for FileWriteTool
-            directory = os.path.dirname(path) or "." # Default to current dir if no dir part
-            filename = os.path.basename(path)
-            if not filename:
-                 raise ValueError("Path must include a filename.")
-
-            # Call the tool's run method
-            result_message = self._tool._run(directory=directory, file_name=filename, text=content)
-            logger.info(f"CrewAI FileWriteTool successful for: {path}. Message: {result_message}")
-            # Assume success if no exception, result_message might confirm
-            return {'status': 'success', 'message': result_message}
+            # Ensure parent directory exists
+            p = Path(path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            
+            with open(p, 'w', encoding='utf-8') as f:
+                f.write(content)
+            logger.info(f"Direct file write successful for: {path}")
+            return {'status': 'success', 'message': f"Content successfully written to {path}."}
         except Exception as e:
-            logger.error(f"CrewAI FileWriteTool failed for {path}: {e}", exc_info=True)
-            return {'status': 'failure', 'message': f'FileWriteTool error: {e}'}
+            logger.error(f"Direct file write failed for {path}: {e}", exc_info=True)
+            return {'status': 'failure', 'message': f'Direct file write error: {e}'}
 
 class CrewAIFileReader(IFileReader):
     """Implements IFileReader using crewai_tools.FileReadTool."""
@@ -127,4 +122,3 @@ class CustomFileReplacer(IFileReplacer):
         except Exception as e:
             logger.error(f"CustomFileReplacer failed unexpectedly for {path}: {e}", exc_info=True)
             return {'status': 'failure', 'message': f'Unexpected replace error: {e}'}
-
