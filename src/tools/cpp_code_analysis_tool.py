@@ -1,12 +1,12 @@
 # src/tools/cpp_code_analysis_tool.py
-from crewai import Tool
+from crewai.tools import BaseTool
 from src.logger_setup import get_logger
 from src.core.context_manager import ContextManager
 import src.config as config # For MAX_CONTEXT_TOKENS if needed, or default in method
 
 logger = get_logger(__name__)
 
-class CppCodeAnalysisTool(Tool):
+class CppCodeAnalysisTool(BaseTool):
     name: str = "CppCodeAnalysisTool"
     description: str = (
         "Analyzes C++ source code for a specified package ID to identify key classes, "

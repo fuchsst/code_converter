@@ -1,5 +1,5 @@
 # src/tools/structure_analysis_tool.py
-from crewai import Tool
+from crewai.tools import BaseTool
 from src.logger_setup import get_logger
 from src.core.context_manager import ContextManager
 from src.core.state_manager import StateManager # Added for loading artifacts
@@ -8,7 +8,7 @@ from typing import Dict, Any, List
 
 logger = get_logger(__name__)
 
-class StructureAnalysisTool(Tool):
+class StructureAnalysisTool(BaseTool):
     name: str = "GodotStructureAnalysisTool"
     description: str = (
         "Analyzes the Godot project structure for a given package ID. "

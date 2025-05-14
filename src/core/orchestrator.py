@@ -11,11 +11,11 @@ from ..tools.remapping_logic import RemappingLogic
 from .tool_interfaces import IFileWriter, IFileReplacer, IFileReader
 from .step_executor import StepExecutor
 # Import concrete executors (adjust path if they are in a subfolder like 'executors')
-from .executors.step1_analyzer import Step1Executor
-from .executors.step2_package_identifier import Step2Executor
-from .executors.step3_structure_definer import Step3Executor
-from .executors.step4_mapping_definer import Step4Executor
-from .executors.step5_process_code import Step5Executor
+from src.core.executors.step1_analyzer import Step1Executor
+from src.core.executors.step2_package_identifier import Step2Executor
+from src.core.executors.step3_structure_definer import Step3Executor
+from src.core.executors.step4_mapping_definer import Step4MappingExecutor
+from src.core.executors.step5_process_code import Step5Executor
 from src.tools.framework_tools_wrapper import (
     CrewAIFileWriter, CrewAIFileReader, CustomFileReplacer
 )
@@ -177,7 +177,7 @@ class Orchestrator:
             "step1": Step1Executor(self.state_manager, self.context_manager, self.config_dict, llm_configs={}, tools={}),
             "step2": Step2Executor(self.state_manager, self.context_manager, self.config_dict, self.llm_configs, self.tools),
             "step3": Step3Executor(self.state_manager, self.context_manager, self.config_dict, self.llm_configs, self.tools),
-            "step4": Step4Executor(self.state_manager, self.context_manager, self.config_dict, self.llm_configs, self.tools),
+            "step4": Step4MappingExecutor(self.state_manager, self.context_manager, self.config_dict, self.llm_configs, self.tools),
             "step5": Step5Executor(self.state_manager, self.context_manager, self.config_dict, self.llm_configs, self.tools, self.remapping_logic)
         }
         logger.debug("Step executors initialized.")
