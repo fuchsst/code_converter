@@ -118,7 +118,7 @@ class Step3Executor(StepExecutor):
             current_status = pkg_data.get('status')
             is_target = (current_status == target_status)
             is_failed_this_step = (current_status and current_status.startswith(failed_status_prefix))
-            is_already_completed = (current_status == completed_status)
+            is_running = (current_status == running_status)
 
             # Check if it matches specific request if provided
             matches_specific_request = (not package_ids or pkg_id in package_ids)
@@ -126,7 +126,7 @@ class Step3Executor(StepExecutor):
             if matches_specific_request:
                 if is_target:
                     potential_target_package_ids.add(pkg_id)
-                elif force and (is_failed_this_step or is_already_completed):
+                elif force and (is_failed_this_step or is_running or is_target):
                     logger.info(f"Force=True: Package '{pkg_id}' (status: {current_status}) will be re-processed for Step 3.")
                     potential_target_package_ids.add(pkg_id)
 
@@ -151,7 +151,7 @@ class Step3Executor(StepExecutor):
 
                 if is_target:
                     packages_to_process_this_run.append(pkg_id)
-                elif force and (is_failed_this_step or is_already_completed or is_running):
+                elif force and (is_failed_this_step or is_running):
                     # Reset status to target status before processing if forced
                     self.state_manager.update_package_state(pkg_id, target_status, error=None) # Clear previous error/status
                     packages_to_process_this_run.append(pkg_id)
