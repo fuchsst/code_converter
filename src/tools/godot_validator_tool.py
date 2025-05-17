@@ -39,7 +39,7 @@ def validate_godot_project(godot_project_path: str, godot_exe_path: str = config
 
     try:
         # Prepare the command for project validation
-        command = [godot_exe_path, "--headless", "--path", godot_project_path]
+        command = [godot_exe_path, "--headless", "--path", godot_project_path, "-e", "--quit"]
 
         # Execute the command
         logger.debug(f"Executing project validation command: {' '.join(command)}")

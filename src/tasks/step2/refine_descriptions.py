@@ -1,23 +1,12 @@
 # src/tasks/refine_descriptions.py
 from crewai import Task, Agent
-from typing import Dict, Any, List, Optional # Added Optional
+from typing import Dict, Any, Optional
+from src.models.package_models import RefinedDescriptionsOutput
 from src.logger_setup import get_logger
-import json
 from collections import Counter
-from pydantic import BaseModel, Field
 
 logger = get_logger(__name__)
 
-# --- Pydantic Model for Structured Output ---
-# We expect a dictionary where keys are package names (strings)
-# and values are the refined description strings.
-class RefinedPackageDescriptionOutput(BaseModel):
-    package_id: str = Field(..., description="The unique identifier for the package.")
-    package_description: str = Field(..., description="A concise description of the package's overall purpose.")
-
-class RefinedDescriptionsOutput(BaseModel):
-    """Defines the structure for describing a list of work packages."""
-    package_descriptions: List[RefinedPackageDescriptionOutput] = Field(..., description="A list of mappings of package names to their refined descriptions.")
 
 
 def create_refined_descriptions_task(agent: Agent,

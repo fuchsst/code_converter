@@ -94,7 +94,7 @@ class MappingFlow(Flow):
         
         # Initialize tools
         self.cpp_analysis_tool = CppCodeAnalysisTool(context_manager)
-        self.structure_analysis_tool = StructureAnalysisTool(context_manager)
+        self.structure_analysis_tool = StructureAnalysisTool(state_manager=state_manager,context_manager=context_manager)
         
         # Add tools to agents (as per draft, though current step4 agents don't show tool usage in their definitions)
         # This might need adjustment if the step4 agents are not designed to use these tools.
@@ -289,22 +289,24 @@ class MappingFlow(Flow):
         }
         
         # Task 3: Define Strategy
-        # Outputs from analyze_cpp_task_obj and analyze_godot_task_obj will be passed via context.
+        # The cpp_analysis and godot_analysis strings are passed directly for description construction.
+        # The Task objects analyze_cpp_task_obj and analyze_godot_task_obj are passed via context
+        # for the agent to access their full outputs during execution.
         define_strategy_task_obj: Task = create_define_strategy_task(
             agent=self.strategist,
+            cpp_analysis=cpp_context_for_task,
+            godot_analysis=godot_structure_context_for_task,
             package_id=self.package_id,
-            existing_mapping_json_str=existing_mapping_json_str, # Pass existing mapping directly
+            existing_mapping=existing_mapping_json_str,
             feedback=self.feedback # Pass feedback directly
         )
-        # Set the context for the strategy task
+        # Set the context for the strategy task (for agent execution)
         define_strategy_task_obj.context = [analyze_cpp_task_obj, analyze_godot_task_obj]
         
-        # The 'dependencies' key in flow_step is for conceptual understanding or a custom runner,
-        # CrewAI's sequential process uses the task order and task.context.
         define_strategy_flow_step = {
             "name": "define_strategy", 
             "task": define_strategy_task_obj
-            # "dependencies": ["analyze_cpp", "analyze_godot_structure"] # This is informational for this structure
+            # Dependencies are implicitly handled by task order and context in CrewAI sequential process
         }
         
         flow_definition = [analyze_cpp_flow_step, analyze_godot_flow_step, define_strategy_flow_step]
@@ -372,16 +374,22 @@ class MappingFlow(Flow):
         flow_definition.append(merge_all_groups_flow_step)
         
         # Final Task: Format JSON
-        format_json_task_obj: Task = create_format_json_task( # Signature will change
+        # Pass placeholders for strategy and task_groups, which will be resolved from context by CrewAI.
+        # The names of the tasks providing context are used for the placeholders.
+        strategy_placeholder = f"{{{define_strategy_task_obj.name}.output}}"
+        task_groups_placeholder = f"{{{merge_all_groups_task_obj.name}.output}}"
+
+        format_json_task_obj: Task = create_format_json_task(
             agent=self.formatter,
-            package_id=self.package_id
-            # strategy and task_groups will come from context
+            package_id=self.package_id,
+            strategy=strategy_placeholder,
+            task_groups=task_groups_placeholder # This will be a string placeholder
         )
-        # Set context for format_json_task
+        # Set context for format_json_task, so placeholders can be resolved by CrewAI during execution.
         format_json_task_obj.context = [define_strategy_task_obj, merge_all_groups_task_obj]
 
         format_json_flow_step = {
-            "name": "format_json", 
+            "name": "format_json",
             "task": format_json_task_obj
         }
         flow_definition.append(format_json_flow_step)
@@ -427,7 +435,7 @@ class MappingFlow(Flow):
             agents=all_agents_for_crew,
             tasks=tasks_for_crew, # Pass the list of Task objects
             process=Process.sequential, 
-            verbose=2, # TODO: Consider making this configurable via self.llm_config or similar
+            verbose=True, # TODO: Consider making this configurable.
             memory=True # Enable memory for context sharing between tasks
         )
 
@@ -469,31 +477,31 @@ class MappingFlow(Flow):
                 elif hasattr(last_task_output, 'json_dict') and isinstance(last_task_output.json_dict, dict):
                     logger.info("Using json_dict (from output_json) from the last task for final result.")
                     final_output_dict = last_task_output.json_dict
-                # Then, check raw_output if it's already a dictionary
-                elif isinstance(last_task_output.raw_output, dict):
-                     logger.info("Using raw_output (already a dict) from the last task for final result.")
-                     final_output_dict = last_task_output.raw_output
-                # If raw_output is a string, try to parse it
-                elif isinstance(last_task_output.raw_output, str):
-                    logger.info("Using raw_output (string) from the last task. Attempting to parse as JSON.")
+                # Then, check raw if it's already a dictionary
+                elif isinstance(last_task_output.raw, dict):
+                     logger.info("Using raw (already a dict) from the last task for final result.")
+                     final_output_dict = last_task_output.raw
+                # If raw is a string, try to parse it
+                elif isinstance(last_task_output.raw, str):
+                    logger.info("Using raw (string) from the last task. Attempting to parse as JSON.")
                     try:
-                        final_output_dict = json.loads(last_task_output.raw_output)
+                        final_output_dict = json.loads(last_task_output.raw)
                     except json.JSONDecodeError as e:
-                        logger.error(f"Failed to parse raw_output string from last task as JSON: {e}")
-                        logger.debug(f"Problematic raw_output string from last task: {last_task_output.raw_output}")
+                        logger.error(f"Failed to parse raw string from last task as JSON: {e}")
+                        logger.debug(f"Problematic raw string from last task: {last_task_output.raw}")
                         # Fallback to crew's raw output if last task's output is problematic
                         if isinstance(crew_result.raw, str):
                             logger.warning("Falling back to crew_result.raw due to parsing error in last task output.")
                             try:
                                 final_output_dict = json.loads(crew_result.raw)
                             except json.JSONDecodeError as e_raw:
-                                raise ValueError(f"Last task raw_output and crew_result.raw were strings but not valid JSON.") from e_raw
+                                raise ValueError(f"Last task raw and crew_result.raw were strings but not valid JSON.") from e_raw
                         elif isinstance(crew_result.raw, dict):
                              final_output_dict = crew_result.raw
                         else:
-                            raise ValueError(f"Last task raw_output was a string but not valid JSON, and crew_result.raw is not usable.") from e
+                            raise ValueError(f"Last task raw was a string but not valid JSON, and crew_result.raw is not usable.") from e
                 else:
-                    logger.warning(f"Last task output in CrewOutput is not Pydantic, JSON string, or dict. Raw output type: {type(last_task_output.raw_output)}, Content: {str(last_task_output.raw_output)[:200]}")
+                    logger.warning(f"Last task output in CrewOutput is not Pydantic, JSON string, or dict. Raw output type: {type(last_task_output.raw)}, Content: {str(last_task_output.raw)[:200]}")
                     # Try crew_result.raw as a last resort before failing
                     if isinstance(crew_result.raw, str):
                         try:

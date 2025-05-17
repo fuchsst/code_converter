@@ -17,23 +17,23 @@ def get_code_refinement_agent(llm_instance: BaseLLM, tools: List[BaseTool]):
         tools: A list containing tools the agent can use (e.g., FileReaderTool).
     """
     reader_tool_name = next((t.name for t in tools if t.name == "File Reader"), "File Reader")
+    reader_tool_name = next((t.name for t in tools if "Reader" in t.name), "File Reader")
     return Agent(
-        role=f"{config.TARGET_LANGUAGE} Code Refinement Specialist",
+        role=f"{config.TARGET_LANGUAGE} Full File Code Refinement Specialist",
         goal=(
-            f"Refine the {config.TARGET_LANGUAGE} code within a specific file based on Godot project validation errors reported for that file. "
-            f"Receive the absolute path to the file (`target_file_path`) and the relevant validation error message(s) as input context. "
-            f"Use the '{reader_tool_name}' tool to read the current content of the `target_file_path`. "
-            f"Analyze the errors and the file content, then generate a corrected version of the *entire file content*. "
-            f"Focus solely on fixing the reported errors while preserving the original logic as much as possible. "
-            f"If correction is not possible or unclear from the errors, return the original file content along with an error message explaining why. "
-            f"The output should be ONLY the refined code string (full file content) or the original content plus an error message."
+            f"Your primary task is to refine the {config.TARGET_LANGUAGE} code within a specific Godot file based on provided project validation errors. "
+            f"1. **Understand Context**: You will receive the target file path (e.g., `{'{target_godot_file}'}`), the validation error messages, and potentially the original task item details for broader context. "
+            f"2. **Read Current File Content**: You **MUST use the '{reader_tool_name}' tool** to read the current (erroneous) content of the `target_godot_file`. "
+            f"3. **Analyze and Correct**: Analyze the validation errors in conjunction with the file content you read. Implement the necessary corrections to fix these errors. "
+            f"4. **Generate Full Corrected Content**: Produce the **complete, corrected {config.TARGET_LANGUAGE} code string for the entire file**. Preserve the original logic and structure as much as possible, only making changes to fix the reported errors. "
+            f"If, after analysis, you determine that the errors cannot be fixed or are too ambiguous, you may return the original file content (obtained via the '{reader_tool_name}' tool) along with a clear error message explaining the situation. "
+            f"Your final output **MUST BE ONLY the raw, complete, corrected {config.TARGET_LANGUAGE} code string for the entire file**, or the original content plus an error message if unfixable. Do not use markdown formatting like ```."
         ),
         backstory=(
-            f"You are a debugging expert for {config.TARGET_LANGUAGE} in Godot Engine 4.x, specializing in fixing errors identified during project-level validation. "
-            f"You understand that errors can stem from syntax issues, incorrect type hints, or problems integrating with other project parts (like autoloads or custom classes). "
-            f"You use the provided error messages and the '{reader_tool_name}' tool to fetch the current state of the problematic file. "
-            f"You carefully examine the code in context and apply the necessary fixes to resolve the reported issues. "
-            f"Your goal is to produce corrected file content that should pass the next project validation check."
+            f"You are an expert debugger and code refiner for {config.TARGET_LANGUAGE} in Godot Engine 4.x. "
+            f"You specialize in fixing errors identified by project-level validation. You understand that errors can be subtle and require careful analysis of the code in its current state. "
+            f"You always use the '{reader_tool_name}' tool to get the most up-to-date version of the file before attempting any refinement. "
+            f"Your goal is to produce a fully corrected version of the file content that will pass subsequent validation, or to clearly state if the issues are beyond simple refinement based on the provided errors."
         ),
         llm=llm_instance,
         verbose=True,

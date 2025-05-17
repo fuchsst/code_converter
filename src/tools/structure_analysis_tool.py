@@ -17,11 +17,12 @@ class StructureAnalysisTool(BaseTool):
     )
     # context_manager: ContextManager # ContextManager might not be directly needed if StateManager handles artifact loading
     state_manager: StateManager # Tool will use StateManager to load the structure artifact
+    context_manager: ContextManager # Keep for potential future use or if some info comes via CM
 
-    def __init__(self, state_manager: StateManager, context_manager: ContextManager, **kwargs): # Added context_manager for consistency if needed later
-        super().__init__(**kwargs)
+    def __init__(self, state_manager: StateManager, context_manager: ContextManager, **kwargs):
+        super().__init__(state_manager=state_manager, context_manager=context_manager, **kwargs)
         self.state_manager = state_manager
-        self.context_manager = context_manager # Keep for potential future use or if some info comes via CM
+        self.context_manager = context_manager
         self.name = "GodotStructureAnalysisTool"
         self.description = (
             "Analyzes the Godot project structure for a given package ID. "

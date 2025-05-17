@@ -16,8 +16,7 @@ class CppCodeAnalysisTool(BaseTool):
     context_manager: ContextManager
 
     def __init__(self, context_manager: ContextManager, **kwargs):
-        super().__init__(**kwargs)
-        self.context_manager = context_manager
+        super().__init__(context_manager=context_manager, **kwargs)
         self.name = "CppCodeAnalysisTool" # Ensure name is set
         self.description = ( # Ensure description is set
             "Analyzes C++ source code for a specified package ID to identify key classes, "

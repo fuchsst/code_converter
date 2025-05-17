@@ -2,10 +2,9 @@
 import json
 from crewai import Task, Agent
 from src.logger_setup import get_logger
-import src.config as config
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, Field
-from typing import Optional, Literal
+from typing import Optional
 
 logger = get_logger(__name__)
 
@@ -27,7 +26,6 @@ class RemappingAdvice(BaseModel):
     recommend_remapping: bool = Field(..., description="True if remapping is recommended, False otherwise.")
     reason: Optional[str] = Field(description="Explanation for the recommendation.")
     feedback: Optional[str] = Field(description="Detailed feedback for Step 4 if remapping is recommended.")
-
 
 
 def create_analyze_package_failures_task(

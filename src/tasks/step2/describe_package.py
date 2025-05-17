@@ -1,22 +1,10 @@
 # src/tasks/describe_package.py
 from crewai import Task, Agent
-from typing import List, Dict, Optional
+from typing import List, Optional
+from src.models.package_models import PackageDescriptionOutput
 from src.logger_setup import get_logger
-import json
-from pydantic import BaseModel, Field # Import Pydantic components
 
 logger = get_logger(__name__)
-
-# --- Pydantic Models for Structured Output ---
-class FileRole(BaseModel):
-    """Defines the structure for describing a single file's role."""
-    file_path: str = Field(..., description="The relative path of the file.")
-    role: str = Field(..., description="A brief description of the file's role within the package.")
-
-class PackageDescriptionOutput(BaseModel):
-    """Defines the overall expected JSON output structure for the task."""
-    package_description: str = Field(..., description="A concise description of the package's overall purpose.")
-    file_roles: List[FileRole] = Field(..., description="A list detailing the role of each file in the package.")
 
 
 def create_describe_package_task(
