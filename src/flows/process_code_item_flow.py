@@ -1,9 +1,9 @@
 # src/flows/process_code_item_flow.py
-from crewai import Crew, Process, Task, Agent
+from crewai import Crew, Process, Task
 from crewai.tasks.task_output import TaskOutput
 from crewai.flow.flow import Flow # Correct import for Flow base class
 
-from typing import Dict, Any, List, Optional, Type
+from typing import Dict, Any, Optional
 
 from src.logger_setup import get_logger
 import src.config as config
@@ -16,7 +16,6 @@ from src.models.process_code_models import (
     ProcessCodeItemFlowState, # May not be directly used by crewai.flow.Flow state, but good for reference
     ProcessCodeItemFlowOutput
 )
-from src.tasks.step5.process_code import TaskItemProcessingResult # For ensuring compatibility
 
 # Agents for Step 5
 from src.agents.step5.code_generator import get_code_generator_agent
@@ -27,10 +26,9 @@ from src.agents.step5.code_refiner import get_code_refinement_agent
 # Tools
 from src.tools.crewai_tools import (
     FileWriterTool,
-    FileReaderTool,
-    GodotProjectValidatorTool
+    GodotProjectValidatorTool,
+    GodotFileReaderTool
 )
-from src.utils.json_utils import parse_json_from_string
 import json
 import re
 
@@ -67,7 +65,7 @@ class ProcessCodeItemFlow(Flow[ProcessCodeItemFlowState]): # Using ProcessCodeIt
         logger.info(f"ProcessCodeItemFlow initialized for task_id: {self.state.task_id}, target: {self.state.target_godot_file}")
 
         # --- Instantiate Tools ---
-        self.file_reader_tool = FileReaderTool()
+        self.file_reader_tool = GodotFileReaderTool()
         self.file_writer_tool = FileWriterTool()
         self.project_validator_tool = GodotProjectValidatorTool()
         logger.debug("Instantiated tools for ProcessCodeItemFlow.")

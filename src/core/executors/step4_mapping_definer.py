@@ -1,11 +1,12 @@
 # src/core/executors/step4_mapping_executor.py
+import json
 from typing import List, Dict, Any, Optional, Set, Type
 
+from src.models.mapping_models import MappingOutput
 from src.core.state_manager import StateManager
 from src.core.context_manager import ContextManager
 from src.core.step_executor import StepExecutor
-from src.flows.mapping_flow import MappingFlow
-from src.utils.json_utils import parse_json_from_string
+from src.flows.mapping_flow import DefineMappingPipelineFlow
 from src.logger_setup import get_logger
 import src.config as config
 
@@ -189,17 +190,60 @@ class Step4MappingExecutor(StepExecutor):
         
         # Create and run the mapping flow
         try:
-            mapping_flow = MappingFlow(
-                state_manager=self.state_manager,
+            # Instantiate the renamed flow class
+            # The DefineMappingPipelineFlow expects llm, context_manager, state_manager
+            # We need to pass the primary LLM instance or adjust the flow's __init__
+            # For now, assuming the 'DESIGNER_PLANNER_MODEL' is the primary one for the flow's internal agent setup.
+            # The DefineMappingPipelineFlow now has a parameterless __init__ and a configure method.
+            mapping_flow = DefineMappingPipelineFlow()
+            mapping_flow.configure(
+                llm_instances=llm_config,
                 context_manager=self.context_manager,
-                llm_config=llm_config,
-                package_id=pkg_id,
-                is_remapping=is_remapping,
-                feedback=feedback
+                state_manager=self.state_manager
             )
             
+            # Prepare kickoff inputs for the flow
+            # Construct a more comprehensive initial_context_str for the flow
+            cpp_content = self.context_manager.get_work_package_source_code_content(pkg_id)
+            # Ensure target_file_list is serializable if it contains non-standard objects; it should be list of dicts.
+            target_files_list = self.context_manager.get_target_file_list(pkg_id)
+            try:
+                target_files_json = json.dumps(target_files_list)
+            except TypeError as e:
+                logger.error(f"Could not serialize target_files_list for package {pkg_id}: {e}", exc_info=True)
+                target_files_json = "[]" # Default to empty list string on error
+
+            initial_context_parts = [
+                f"--- C++ Source Code for Package {pkg_id} ---\n{cpp_content}",
+                f"\n\n--- Target Godot File List for Package {pkg_id} ---\n{target_files_json}"
+            ]
+            # Potentially add more global context or specific instructions if needed by the flow's step0
+            # For example, general instructions from context_manager could be added here.
+            # general_instructions_str = self.context_manager.get_instruction_context()
+            # if general_instructions_str:
+            #     initial_context_parts.append(f"\n\n--- General Instructions ---\n{general_instructions_str}")
+
+            initial_context_str_for_flow = "\n".join(initial_context_parts)
+
+            kickoff_inputs = {
+                "package_id": pkg_id,
+                "initial_context_str": initial_context_str_for_flow,
+                # Pass existing mapping and feedback directly if available,
+                # so the flow's state can be initialized with them.
+                "existing_mapping_for_strategist": json.dumps(self.state_manager.load_artifact(f"package_{pkg_id}_mapping.json", expect_json=True)) if is_remapping else None,
+                "feedback_for_strategist": feedback
+            }
+            
             # Run the flow and get the mapping output
-            mapping_output = mapping_flow.run()
+            mapping_output_model = mapping_flow.kickoff(inputs=kickoff_inputs)
+
+            if not mapping_output_model or not isinstance(mapping_output_model, MappingOutput):
+                logger.error(f"Mapping flow for package {pkg_id} did not return a valid MappingOutput model.")
+                # Check flow state for errors
+                flow_state_error = mapping_flow.state.error_message if hasattr(mapping_flow, 'state') and hasattr(mapping_flow.state, 'error_message') else "Unknown flow error"
+                raise ValueError(f"Mapping flow failed or returned invalid output. Error: {flow_state_error}")
+
+            mapping_output = mapping_output_model.model_dump() # Convert Pydantic model to dict
             
             # Save the mapping output
             save_json_ok = self.state_manager.save_artifact(

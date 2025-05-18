@@ -21,6 +21,8 @@ def get_structure_designer_agent(llm_instance: BaseLLM) -> Agent:
             f"Base the design on the C++ code analysis and global project context analysis provided. "
             f"Adhere strictly to SOLID principles and Godot best practices ({config.TARGET_LANGUAGE}). "
             f"Consider existing structure definitions for refinement if provided. "
+            f"Make sure to write valid Godot files (.gd for gdscript, .tres for resources, .tscn for scenes, .py for migration python scripts, .shader for shader code). "
+            f"Ensure all file locations follow Godot project strucutre best practices. "
             f"Output the designed structure components (lists of scenes, scripts, resources, etc.) and descriptive notes. "
             f"Fokus on the current work package and its context. Don't list scripts or scenes that are not core part of this work packages. "
         ),

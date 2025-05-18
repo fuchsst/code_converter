@@ -20,22 +20,45 @@ def create_merge_task_groups_task(agent, strategy: str, group_tasks_outputs: Lis
     Returns:
         Task object for merging task groups and creating final output.
     """
-    # Create a combined context of all group outputs for the task description
-    # The agent will receive these as structured data, not just placeholders in description.
-    # However, for the description, a summary or placeholder is fine.
-    group_outputs_description_placeholder = []
-    for i, group_output in enumerate(group_tasks_outputs):
-        # Try to get a title if it's a TaskGroup or dict, otherwise just use index
-        title = "Unknown Group"
-        if isinstance(group_output, TaskGroup) and hasattr(group_output, 'group_title'):
-            title = group_output.group_title
-        elif isinstance(group_output, dict) and 'group_title' in group_output:
-            title = group_output['group_title']
-        group_outputs_description_placeholder.append(f"  - TaskGroup {i+1} (e.g., for '{title}')")
+    # Serialize the actual task groups data to include in the description
+    # This ensures the JSON formatter agent has the complete data to work with
+    import json
     
-    group_outputs_context_for_description = "\n".join(group_outputs_description_placeholder)
-    if not group_outputs_context_for_description:
-        group_outputs_context_for_description = "  - (No component groups provided)"
+    # Ensure the task groups are serializable
+    serializable_task_groups = []
+    for group in group_tasks_outputs:
+        if isinstance(group, TaskGroup):
+            serializable_task_groups.append(group.model_dump())
+        elif isinstance(group, dict):
+            serializable_task_groups.append(group)
+        else:
+            # Try to convert to dict if it has a __dict__ attribute
+            try:
+                serializable_task_groups.append(vars(group))
+            except:
+                logger.warning(f"Could not serialize task group of type {type(group)}. Using str representation.")
+                serializable_task_groups.append(str(group))
+    
+    # Serialize the task groups to JSON
+    try:
+        task_groups_json = json.dumps(serializable_task_groups, indent=2)
+    except Exception as e:
+        logger.error(f"Error serializing task groups to JSON: {e}")
+        # Fallback to a simple representation
+        task_groups_json = str(group_tasks_outputs)
+    
+    # Create a summary for logging purposes
+    group_outputs_description_placeholder = []
+    for i, group in enumerate(serializable_task_groups):
+        title = group.get('group_title', f"Group {i+1}")
+        task_count = len(group.get('tasks', []))
+        group_outputs_description_placeholder.append(f"  - TaskGroup {i+1}: '{title}' with {task_count} tasks")
+    
+    group_outputs_summary = "\n".join(group_outputs_description_placeholder)
+    if not group_outputs_summary:
+        group_outputs_summary = "  - (No component groups provided)"
+    
+    logger.info(f"Merging {len(serializable_task_groups)} task groups:\n{group_outputs_summary}")
 
     # Create an example of the required JSON structure for the expected_output field
     example_output_model = MappingOutput(
@@ -63,8 +86,9 @@ You have been provided with:
     ```
 
 2.  **Component Task Groups:** A list of structured TaskGroup objects, one for each relevant component type (scripts, resources, scenes, etc.). These have already been generated.
-    (Content of these groups will be provided in the task's context/memory, summarized here:)
-{group_outputs_context_for_description}
+    ```json
+{task_groups_json}
+    ```
 
 ## Your Task:
 Your primary responsibility is to assemble these components into a single, valid JSON object that strictly conforms to the `MappingOutput` schema.

@@ -22,3 +22,41 @@ class MappingOutput(BaseModel):
     package_id: str = Field(..., description="The ID of the work package this mapping belongs to.")
     mapping_strategy: str = Field(..., description="High-level summary of the mapping approach for this package.")
     task_groups: List[TaskGroup] = Field(..., description="A list of task groups detailing the conversion plan.")
+
+# --- New Model for Flow State ---
+class DefineMappingFlowState(BaseModel):
+    """
+    Manages the state of the DefineMappingPipelineFlow.
+    The 'id' field for Flow persistence will be the package_id.
+    """
+    id: Optional[str] = Field(None, description="Unique identifier for the flow instance, MUST be the package_id. Set during kickoff.")
+    package_id: Optional[str] = Field(None, description="The ID of the work package being processed. Set during kickoff.")
+    initial_context_str: Optional[str] = Field(None, description="The comprehensive context string provided at the start of the flow for the package.")
+
+    # Contexts prepared for specific agents/steps from the initial_context_str or other sources
+    cpp_source_for_analyst: Optional[str] = Field(None, description="Specific C++ source code content for the CppCodeAnalystAgent.")
+    godot_structure_for_analyst: Optional[str] = Field(None, description="Specific Godot project structure definition for the GodotStructureAnalystAgent.")
+    existing_mapping_for_strategist: Optional[str] = Field(None, description="Existing mapping JSON string for the ConversionStrategistAgent, if any.")
+    feedback_for_strategist: Optional[str] = Field(None, description="Feedback text for the ConversionStrategistAgent, if any.")
+    general_instructions: Optional[str] = Field(None, description="General instructions for the overall mapping process, if any, extracted from initial_context_str.")
+
+    # Raw outputs from intermediate tasks
+    cpp_analysis_raw: Optional[str] = Field(None, description="Raw textual output from the C++ analysis task.")
+    godot_analysis_raw: Optional[str] = Field(None, description="Raw textual output from the Godot structure analysis task.")
+    strategy_raw: Optional[str] = Field(None, description="Raw textual output of the conversion strategy.")
+    # Storing task_groups as a JSON string as agent output might be a string.
+    # The flow will parse this before passing to the final assembly task.
+    task_groups_json_str: Optional[str] = Field(None, description="JSON string representing the list of TaskGroup objects from the decomposition step.")
+
+    # Final output
+    final_mapping_output: Optional[MappingOutput] = Field(None, description="The final structured MappingOutput object.")
+
+    # Flow status tracking
+    current_step_name: str = Field("initial", description="Name of the current or last executed/attempted step in the flow.")
+    error_message: Optional[str] = Field(None, description="Any error message encountered during flow execution.")
+    is_complete: bool = Field(False, description="Flag indicating if the flow has completed successfully.")
+    is_failed: bool = Field(False, description="Flag indicating if the flow has failed.")
+    # You could add retry_count, timestamps for steps, etc., if needed for more advanced state tracking.
+
+    class Config:
+        validate_assignment = True # Ensures type checking on attribute assignment

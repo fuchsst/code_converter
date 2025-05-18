@@ -6,11 +6,15 @@ import src.config as config
 import os
 
 from src.tools.godot_validator_tool import validate_godot_project
-from src.tools.framework_tools_wrapper import CrewAIFileWriter, CrewAIFileReader, CustomFileReplacer
+from src.tools.framework_tools_wrapper import CrewAIFileWriter, CustomFileReplacer # Removed CrewAIFileReader
 from src.tools.remapping_logic import RemappingLogic
-from src.core.tool_interfaces import IFileWriter, IFileReader, IFileReplacer
+from src.core.tool_interfaces import IFileWriter, IFileReplacer # Removed IFileReader from here as it's used by the new tools
 from src.logger_setup import get_logger
 from src.tasks.step5.process_code import RemappingAdvice
+# Import new reader tools and their schemas
+from src.tools.cpp_file_reader_tool import CppFileReaderTool, CppReadFileInput
+from src.tools.godot_file_reader_tool import GodotFileReaderTool, GodotReadFileInput
+
 
 logger = get_logger(__name__)
 
@@ -26,9 +30,6 @@ class ReplaceFileInput(BaseModel):
     file_path: str = Field(..., description="The file path. Can be res:// in GODOT_PROJECT_DIR, or relative to CPP_PROJECT_DIR.")
     diff: str = Field(..., description="The diff string in SEARCH/REPLACE format.")
 
-class ReadFileInput(BaseModel):
-    """Input schema for FileReaderTool."""
-    file_path: str = Field(..., description="The file path. Can be absolute, res://, or relative to CPP_PROJECT_DIR.")
 
 class ProjectValidationInput(BaseModel):
     """Input schema for GodotProjectValidatorTool."""
@@ -121,47 +122,6 @@ class FileReplacerTool(BaseTool):
         message = result.get('message', 'No message provided.')
         return f"File Replace Status: {status}. Message: {message}"
 
-class FileReaderTool(BaseTool):
-    name: str = "File Reader"
-    description: str = ("Reads the entire content of the specified file path. "
-                        "Interprets res:// paths relative to GODOT_PROJECT_DIR, other relative paths to CPP_PROJECT_DIR. "
-                        "Requires 'file_path'. Returns the file content or an error message if reading fails.")
-    args_schema: Type[BaseModel] = ReadFileInput
-    reader: IFileReader = CrewAIFileReader()
-
-    def _run(self, file_path: str) -> str:
-        logger.debug(f"FileReaderTool executing: received path='{file_path}'")
-        resolved_path_str: str
-        
-        if os.path.isabs(file_path):
-            resolved_path_str = file_path
-            logger.debug(f"FileReaderTool: Path '{file_path}' is absolute.")
-        elif file_path.startswith("res://"):
-            godot_project_dir = config.GODOT_PROJECT_DIR
-            if godot_project_dir:
-                relative_path = file_path[len("res://"):]
-                resolved_path_str = os.path.abspath(os.path.join(godot_project_dir, relative_path))
-                logger.debug(f"FileReaderTool: Converted 'res://' path '{file_path}' to absolute path: '{resolved_path_str}'")
-            else:
-                logger.error("FileReaderTool: GODOT_PROJECT_DIR not configured, cannot resolve res:// path.")
-                return "Error: GODOT_PROJECT_DIR not configured for res:// path."
-        else: # Relative path, not starting with res://, assume relative to CPP_PROJECT_DIR
-            cpp_project_dir = config.CPP_PROJECT_DIR
-            if cpp_project_dir:
-                resolved_path_str = os.path.abspath(os.path.join(cpp_project_dir, file_path))
-                logger.debug(f"FileReaderTool: Resolved relative path '{file_path}' to absolute path: '{resolved_path_str}' using CPP_PROJECT_DIR.")
-            else:
-                logger.error("FileReaderTool: CPP_PROJECT_DIR not configured, cannot resolve relative path.")
-                return "Error: CPP_PROJECT_DIR not configured for relative path."
-                
-        result = self.reader.read(path=resolved_path_str)
-        status = result.get('status', 'failure')
-        if status == 'success':
-            return result.get('content', '')
-        else:
-            message = result.get('message', 'Failed to read file.')
-            logger.warning(f"FileReaderTool failed for path '{resolved_path_str}' (original: '{file_path}'): {message}")
-            return f"Error: {message}"
 
 class GodotProjectValidatorTool(BaseTool):
     name: str = "Godot Project Validator"
