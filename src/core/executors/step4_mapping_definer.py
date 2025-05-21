@@ -29,7 +29,7 @@ class Step4MappingExecutor(StepExecutor):
     def execute(
         self, 
         package_ids: Optional[List[str]] = None, 
-        force: bool = False, 
+        retry: bool = False, 
         **kwargs
     ) -> bool:
         """
@@ -45,7 +45,7 @@ class Step4MappingExecutor(StepExecutor):
             True if mapping definition was successful for the processed packages in this run, False otherwise.
         """
         feedback_override = kwargs.get('feedback_override', {})
-        logger.info(f"--- Starting Step 4 Execution: Define Mapping (Packages: {package_ids or 'All Eligible'}, Force={force}) ---")
+        logger.info(f"--- Starting Step 4 Execution: Define Mapping (Packages: {package_ids or 'All Eligible'}, Force={retry}) ---")
 
         # --- Create LLM configurations for the flow ---
         llm_config = {
@@ -62,16 +62,16 @@ class Step4MappingExecutor(StepExecutor):
             return False
 
         # --- Identify Eligible Packages ---
-        packages_to_process = self._identify_eligible_packages(package_ids, force)
+        packages_to_process = self._identify_eligible_packages(package_ids, retry)
         if not packages_to_process:
             logger.info("No packages require processing in this Step 4 run.")
             return True
 
-        logger.info(f"Packages to process in this Step 4 run (Force={force}): {packages_to_process}")
+        logger.info(f"Packages to process in this Step 4 run (Force={retry}): {packages_to_process}")
         self.state_manager.update_workflow_status('running_step4')
         
         # --- Initialize Overall Mapping Summary ---
-        overall_mapping_summary = self._initialize_mapping_summary(force)
+        overall_mapping_summary = self._initialize_mapping_summary(retry)
 
         # --- Process Each Package ---
         overall_success = True
@@ -82,7 +82,7 @@ class Step4MappingExecutor(StepExecutor):
                     llm_config=llm_config,
                     feedback_override=feedback_override,
                     overall_mapping_summary=overall_mapping_summary,
-                    force=force
+                    force=retry
                 )
                 if not success:
                     overall_success = False
@@ -102,7 +102,7 @@ class Step4MappingExecutor(StepExecutor):
         logger.info(f"--- Finished Step 4 Execution Run (Success: {overall_success}) ---")
         return overall_success
         
-    def _identify_eligible_packages(self, package_ids: Optional[List[str]], force: bool) -> List[str]:
+    def _identify_eligible_packages(self, package_ids: Optional[List[str]], retry: bool) -> List[str]:
         """Identifies packages eligible for processing."""
         packages_to_process = []
         potential_target_package_ids = set()
@@ -112,7 +112,7 @@ class Step4MappingExecutor(StepExecutor):
         failed_mapping_status = 'failed_mapping'
         failed_remapping_status = 'failed_remapping'
         needs_remapping_status = 'needs_remapping'
-        completed_status = 'mapping_defined'
+        is_running_status = 'running_mapping'
         
         all_packages = self.state_manager.get_all_packages()
         if not all_packages:
@@ -129,13 +129,13 @@ class Step4MappingExecutor(StepExecutor):
                 is_target = current_status == target_status
                 is_needs_remapping = current_status == needs_remapping_status
                 is_failed = current_status.startswith(failed_mapping_status) or current_status.startswith(failed_remapping_status)
-                is_completed = current_status == completed_status
+                is_completed = current_status == is_running_status
                 
-                if is_target or is_needs_remapping or (force and (is_failed or is_completed)):
+                if is_target or is_needs_remapping or (retry and (is_failed or is_running_status)):
                     potential_target_package_ids.add(pkg_id)
                     
-                    # Reset status for forced packages
-                    if force and (is_failed or is_completed):
+                    # Reset status for failed packages
+                    if retry and (is_failed or is_running_status):
                         logger.info(f"Force=True: Resetting package '{pkg_id}' status to '{target_status}'")
                         self.state_manager.update_package_state(pkg_id, target_status, error=None)
                     

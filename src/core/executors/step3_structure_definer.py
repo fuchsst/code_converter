@@ -44,20 +44,20 @@ class Step3Executor(StepExecutor):
         super().__init__(state_manager, context_manager, config_dict, llm_configs, tools)
         logger.info("Step3Executor initialized. LLMs and agents will be created dynamically.")
 
-    def execute(self, package_ids: Optional[List[str]] = None, force: bool = False, **kwargs) -> bool:
+    def execute(self, package_ids: Optional[List[str]] = None, retry: bool = False, **kwargs) -> bool:
         """
         Runs the Godot structure definition for specified or all eligible packages.
 
         Args:
             package_ids (Optional[List[str]]): Specific package IDs to process.
                                                 If None, processes all eligible packages.
-            force (bool): If True, forces reprocessing of packages even if already defined or failed.
+            retry (bool): If True, retries reprocessing of packages even if already defined or failed.
             **kwargs: Additional arguments (e.g., instruction_dir).
 
         Returns:
             bool: True if the structure definition was successful for the processed packages in this run, False otherwise.
         """
-        logger.info(f"--- Starting Step 3 Execution (Hierarchical): Define Structure (Requested: {package_ids or 'All Eligible'}, Force: {force}) ---")
+        logger.info(f"--- Starting Step 3 Execution (Hierarchical): Define Structure (Requested: {package_ids or 'All Eligible'}, Retry: {retry}) ---")
 
         # --- Instantiate LLMs and Agents using the new helper ---
         cpp_analyst_llm = self._create_llm_instance('ANALYZER_MODEL')
@@ -126,7 +126,7 @@ class Step3Executor(StepExecutor):
             if matches_specific_request:
                 if is_target:
                     potential_target_package_ids.add(pkg_id)
-                elif force and (is_failed_this_step or is_running or is_target):
+                elif retry and (is_failed_this_step or is_running or is_target):
                     logger.info(f"Force=True: Package '{pkg_id}' (status: {current_status}) will be re-processed for Step 3.")
                     potential_target_package_ids.add(pkg_id)
 
@@ -151,7 +151,7 @@ class Step3Executor(StepExecutor):
 
                 if is_target:
                     packages_to_process_this_run.append(pkg_id)
-                elif force and (is_failed_this_step or is_running):
+                elif retry and (is_failed_this_step or is_running):
                     # Reset status to target status before processing if forced
                     self.state_manager.update_package_state(pkg_id, target_status, error=None) # Clear previous error/status
                     packages_to_process_this_run.append(pkg_id)
@@ -185,7 +185,7 @@ class Step3Executor(StepExecutor):
             # Even if nothing to process now, the run itself didn't fail.
             return True # Indicate this specific invocation had nothing to fail on
 
-        logger.info(f"Packages to process in this Step 3 run (in order, Force={force}): {packages_to_process_this_run}")
+        logger.info(f"Packages to process in this Step 3 run (in order, Force={retry}): {packages_to_process_this_run}")
         # Set running status only if we are actually processing packages
         self.state_manager.update_workflow_status('running_step3')
         overall_success_this_run = True # Tracks success *of this specific run*
@@ -199,11 +199,11 @@ class Step3Executor(StepExecutor):
             pkg_info_at_start_of_execute = all_packages.get(pkg_id, {}) # Use the initial snapshot
             original_status_for_logic = pkg_info_at_start_of_execute.get('status')
 
-            if force and (original_status_for_logic.startswith(failed_status_prefix) or \
+            if retry and (original_status_for_logic.startswith(failed_status_prefix) or \
                            original_status_for_logic == completed_status):
                 logger.info(f"Forcing package {pkg_id} (original status: {original_status_for_logic}): Resetting status to '{target_status}' and clearing error.")
                 self.state_manager.update_package_state(pkg_id, target_status, error=None)
-            elif not force and original_status_for_logic.startswith(failed_status_prefix): # Auto-retry failed
+            elif not retry and original_status_for_logic.startswith(failed_status_prefix): # Auto-retry failed
                 logger.info(f"Auto-retrying failed package {pkg_id} (original status: {original_status_for_logic}): Clearing error.")
                 # Keep original 'failed_structure...' status but clear the error message for a fresh attempt.
                 # The 'running_structure' status will be set next.

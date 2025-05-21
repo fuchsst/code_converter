@@ -54,8 +54,8 @@ class Step5Executor(StepExecutor):
         logger.info("Step5Executor initialized to use ProcessCodeItemFlow.")
 
 
-    def execute(self, package_ids: Optional[List[str]] = None, force: bool = False, **kwargs) -> bool:
-        logger.info(f"--- Starting Step 5 Execution (Flow-Based): (Packages: {package_ids or 'All Eligible'}, Force={force}) ---")
+    def execute(self, package_ids: Optional[List[str]] = None, retry: bool = False, **kwargs) -> bool:
+        logger.info(f"--- Starting Step 5 Execution (Flow-Based): (Packages: {package_ids or 'All Eligible'}, Retry={retry}) ---")
 
         # --- Instantiate LLMs and Tools for Package-Level Analysis ---
         remapping_advisor_tool = RemappingLogicTool()
@@ -101,7 +101,7 @@ class Step5Executor(StepExecutor):
              is_target_loop = (current_status_loop == target_status)
              is_step4_done_or_later_loop = current_status_loop in step4_completed_or_later_states
              matches_specific_request_loop = (not package_ids or pkg_id_loop in package_ids)
-             if matches_specific_request_loop and (is_target_loop or (force and is_step4_done_or_later_loop)):
+             if matches_specific_request_loop and (is_target_loop or (retry and is_step4_done_or_later_loop)):
                        potential_target_package_ids.add(pkg_id_loop)
 
         for pkg_id_loop in potential_target_package_ids:
@@ -113,7 +113,7 @@ class Step5Executor(StepExecutor):
              if is_target_loop or is_running_this_step_loop:
                   if is_running_this_step_loop: logger.info(f"Resuming processing for package '{pkg_id_loop}'.")
                   packages_to_process_this_run.append(pkg_id_loop)
-             elif force and is_step4_done_or_later_loop:
+             elif retry and is_step4_done_or_later_loop:
                   logger.info(f"Force=True: Adding package '{pkg_id_loop}' (status: {current_status_loop}) to process list.")
                   self.state_manager.update_package_state(pkg_id_loop, target_status, error=None)
                   packages_to_process_this_run.append(pkg_id_loop)
@@ -122,7 +122,7 @@ class Step5Executor(StepExecutor):
             logger.info("No packages require processing in this Step 5 run.")
             return True
 
-        logger.info(f"Eligible packages for this Step 5 run (Force={force}): {packages_to_process_this_run}")
+        logger.info(f"Eligible packages for this Step 5 run (Force={retry}): {packages_to_process_this_run}")
         processing_order = self.state_manager.get_package_processing_order()
         if not processing_order or not isinstance(processing_order, list):
             logger.error("Critical: Package processing order missing or invalid. Cannot proceed.")
@@ -147,7 +147,7 @@ class Step5Executor(StepExecutor):
                 if not pkg_info: raise ValueError(f"No package info for {pkg_id}.")
 
                 mapping_artifact_name = pkg_info.get('artifacts', {}).get('mapping_json')
-                if not mapping_artifact_name and force and pkg_info.get('status','').startswith('failed_'):
+                if not mapping_artifact_name and retry and pkg_info.get('status','').startswith('failed_'):
                     mapping_artifact_name = f"package_{pkg_id}_mapping.json"
                 if not mapping_artifact_name: raise FileNotFoundError(f"Mapping JSON missing for {pkg_id}.")
                 

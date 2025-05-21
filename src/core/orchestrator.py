@@ -185,7 +185,7 @@ class Orchestrator:
 
     # --- Public Methods for Pipeline Control (called by CLI) ---
 
-    def run_step(self, step_name: str, package_ids: Optional[List[str]] = None, force: bool = False, **kwargs) -> bool:
+    def run_step(self, step_name: str, package_ids: Optional[List[str]] = None, retry: bool = False, **kwargs) -> bool:
         """
         Executes a specific step by name.
 
@@ -207,10 +207,10 @@ class Orchestrator:
         if step_name in ["step2", "step3", "step4", "step5"]:
              self._reload_context_manager_graph()
 
-        # Pass the force flag and other kwargs down to the executor
+        # Pass the retry flag and other kwargs down to the executor
         try:
             # Add force to the kwargs being passed to the executor
-            kwargs['force'] = force
+            kwargs['retry'] = retry
             return executor.execute(package_ids=package_ids, **kwargs)
         except Exception as e:
             logger.error(f"An unexpected error occurred running step '{step_name}': {e}", exc_info=True)

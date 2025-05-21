@@ -85,7 +85,7 @@ class ConversionCLI:
         logger.info(f"Executing {command_name}...")
         orchestrator = self._get_orchestrator(cpp_dir=cpp_dir, analysis_dir=analysis_dir)
         try:
-            orchestrator.run_step("step2", force=force)
+            orchestrator.run_step("step2", retry=force)
             self._handle_result(orchestrator, command_name)
         except Exception as e:
             logger.error(f"An error occurred executing command '{command_name}': {e}", exc_info=True)
@@ -111,13 +111,13 @@ class ConversionCLI:
         logger.info(f"Executing {command_name} (Packages: {package_ids_list or 'All Eligible'})...")
         orchestrator = self._get_orchestrator(cpp_dir=cpp_dir, godot_dir=godot_dir, analysis_dir=analysis_dir, target_language=target_language)
         try:
-            orchestrator.run_step("step3", package_ids=package_ids_list, force=force)
+            orchestrator.run_step("step3", package_ids=package_ids_list, retry=force)
             self._handle_result(orchestrator, command_name)
         except Exception as e:
             logger.error(f"An error occurred executing command '{command_name}': {e}", exc_info=True)
             sys.exit(1)
 
-    def define_mapping(self, package_id: str | tuple[str] = None, cpp_dir=None, godot_dir=None, analysis_dir=None, target_language=None, force: bool = False):
+    def define_mapping(self, package_id: str | tuple[str] = None, cpp_dir=None, godot_dir=None, analysis_dir=None, target_language=None, retry: bool = False):
         """
         Step 4: Define C++ to Godot mapping for specific or all eligible packages.
 
@@ -135,13 +135,13 @@ class ConversionCLI:
         logger.info(f"Executing {command_name} (Packages: {package_ids_list or 'All Eligible'})...")
         orchestrator = self._get_orchestrator(cpp_dir=cpp_dir, godot_dir=godot_dir, analysis_dir=analysis_dir, target_language=target_language)
         try:
-            orchestrator.run_step("step4", package_ids=package_ids_list, force=force) # Pass force flag
+            orchestrator.run_step("step4", package_ids=package_ids_list, retry=retry)
             self._handle_result(orchestrator, command_name)
         except Exception as e:
             logger.error(f"An error occurred executing command '{command_name}': {e}", exc_info=True)
             sys.exit(1)
 
-    def process_code(self, package_id: str | tuple[str] = None, cpp_dir=None, godot_dir=None, analysis_dir=None, target_language=None, force: bool = False):
+    def process_code(self, package_id: str | tuple[str] = None, cpp_dir=None, godot_dir=None, analysis_dir=None, target_language=None, retry: bool = False):
         """
         Step 5: Generate/modify Godot code based on mapping for specific or all eligible packages.
 
@@ -159,7 +159,7 @@ class ConversionCLI:
         logger.info(f"Executing {command_name} (Packages: {package_ids_list or 'All Eligible'})...")
         orchestrator = self._get_orchestrator(cpp_dir=cpp_dir, godot_dir=godot_dir, analysis_dir=analysis_dir, target_language=target_language)
         try:
-            orchestrator.run_step("step5", package_ids=package_ids_list, force=force)
+            orchestrator.run_step("step5", package_ids=package_ids_list, retry=retry)
             self._handle_result(orchestrator, command_name)
         except Exception as e:
             logger.error(f"An error occurred executing command '{command_name}': {e}", exc_info=True)
