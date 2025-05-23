@@ -10,6 +10,7 @@ from crewai.tasks.task_output import TaskOutput
 # Local application imports
 from ..step_executor import StepExecutor
 from ..state_manager import StateManager
+from ...utils.git_utils import create_git_commit
 from ..context_manager import ContextManager, count_tokens, read_godot_file_content
 from ...tools.remapping_logic import RemappingLogic # Keep for now, might be used by advisor tool directly
 
@@ -164,9 +165,12 @@ class Step5Executor(StepExecutor):
                 instr_context = self.context_manager.get_instruction_context()
                 base_pkg_context_str = self._build_package_context(pkg_id, pkg_info, mapping_data, instr_context)
                 
-                godot_project_abs_path = config.GODOT_PROJECT_DIR 
-                if not godot_project_abs_path:
-                    raise ValueError("GODOT_PROJECT_DIR not configured in src.config.")
+                if not config.GODOT_PROJECT_DIR:
+                    raise ValueError("config.GODOT_PROJECT_DIR is not set. Please configure it in your .env file or src/config.py.")
+                godot_project_abs_path = os.path.abspath(config.GODOT_PROJECT_DIR)
+                # Ensure the directory exists, as it's the root for outputs
+                os.makedirs(godot_project_abs_path, exist_ok=True)
+                logger.info(f"Using absolute Godot project path for processing: {godot_project_abs_path}")
 
                 all_item_results_for_package: List[TaskItemProcessingResult] = []
                 for task_item_details in task_items:
@@ -289,6 +293,27 @@ class Step5Executor(StepExecutor):
                     else: 
                         logger.info(f"Package {pkg_id} successfully processed.")
                         self.state_manager.update_package_state(pkg_id, status='processed', artifacts=artifacts_for_final_update)
+                
+                # --- Git Commit after processing a package ---
+                if config.GODOT_PROJECT_DIR: # Ensure path is set
+                    godot_repo_path = os.path.abspath(config.GODOT_PROJECT_DIR)
+                    task_group_titles = [tg.get('group_title', 'Untitled Group') for tg in mapping_data.get("task_groups", []) if isinstance(tg, dict)]
+                    commit_msg_parts = [f"Processed package '{pkg_id}'"]
+                    if task_group_titles:
+                        commit_msg_parts.append("Task Groups: " + ", ".join(task_group_titles))
+                    else:
+                        commit_msg_parts.append("No specific task groups found in mapping.")
+                    
+                    commit_message = ". ".join(commit_msg_parts)
+                    
+                    logger.info(f"Attempting to commit changes for package {pkg_id} to {godot_repo_path}...")
+                    commit_success = create_git_commit(godot_repo_path, commit_message)
+                    if commit_success:
+                        logger.info(f"Successfully committed changes for package {pkg_id}.")
+                    else:
+                        logger.warning(f"Failed to commit changes for package {pkg_id}. Check logs for details.")
+                else:
+                    logger.warning("GODOT_PROJECT_DIR not configured. Skipping git commit.")
             
             except Exception as e:
                 logger.error(f"Critical error processing package {pkg_id}: {e}", exc_info=True)

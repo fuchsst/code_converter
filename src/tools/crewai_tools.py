@@ -134,34 +134,23 @@ class GodotProjectValidatorTool(BaseTool):
     def _run(self, godot_project_path: str, target_file_path: str) -> str:
         logger.debug(f"GodotProjectValidatorTool executing for project: {godot_project_path}, target_file: {target_file_path}")
         try:
-            result = validate_godot_project(godot_project_path=godot_project_path)
+            # Pass target_file_path as target_file_res_path to validate_godot_project
+            result = validate_godot_project(
+                godot_project_path=godot_project_path,
+                target_file_res_path=target_file_path
+            )
             status = result.get('status', 'failure')
-            errors = result.get('errors') 
+            errors = result.get('errors')
 
             if status == 'success':
                 return "Project validation successful (Exit Code 0)."
             else:
                 if not errors:
                     return "Project validation failed (Non-zero exit code), but no specific errors found on stderr."
-
-                relevant_errors = []
-                normalized_target_path = target_file_path.replace("res://", "").replace("\\", "/")
-                try:
-                    for line in errors.splitlines():
-                        if normalized_target_path in line.replace("\\", "/") or target_file_path in line:
-                            relevant_errors.append(line)
-                except Exception as filter_err:
-                     logger.error(f"Error filtering validation output: {filter_err}", exc_info=True)
-                     return f"Project validation failed. Could not filter errors. Full Errors:\n{errors}"
-
-                if relevant_errors:
-                    filtered_error_string = "\n".join(relevant_errors)
-                    logger.warning(f"Project validation failed with errors relevant to {target_file_path}:\n{filtered_error_string}")
-                    return f"Project validation failed. Errors related to {target_file_path}:\n{filtered_error_string}"
-                else:
-                    logger.info(f"Project validation failed (Exit Code {result.get('returncode', 'N/A')}), but no errors found related to {target_file_path}. Treating as success for this file.")
-                    logger.debug(f"Full validation errors (unrelated):\n{errors}")
-                    return f"Project validation successful (Exit Code 0 for {target_file_path}, though other project errors exist)."
+                
+                # The validate_godot_project function now handles filtering errors for the target file
+                logger.warning(f"Project validation failed with errors relevant to {target_file_path}:\n{errors}")
+                return f"Project validation failed. Errors related to {target_file_path}:\n{errors}"
 
         except Exception as e:
             logger.error(f"Error during GodotProjectValidatorTool execution: {e}", exc_info=True)

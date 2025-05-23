@@ -4,6 +4,7 @@ from crewai.tasks.task_output import TaskOutput
 from crewai.flow.flow import Flow # Correct import for Flow base class
 
 from typing import Dict, Any, Optional
+import os
 
 from src.logger_setup import get_logger
 import src.config as config
@@ -148,8 +149,25 @@ class ProcessCodeItemFlow(Flow[ProcessCodeItemFlowState]): # Using ProcessCodeIt
         self.state.current_status = "writing_initial_file"
         logger.info(f"[{self.state.task_id}] Step 2: Writing initial code to {self.state.target_godot_file}.")
         try:
+            # Construct absolute path to target file in Godot project
+            # self.flow_input.godot_project_path is already an absolute path to the project root
+            # self.state.target_godot_file might be like "res://scenes/file.tscn" or "scripts/file.gd"
+            
+            relative_file_path_in_project = self.state.target_godot_file
+            if relative_file_path_in_project.startswith("res://"):
+                relative_file_path_in_project = relative_file_path_in_project[len("res://"):]
+            
+            absolute_target_path = os.path.join(self.flow_input.godot_project_path, relative_file_path_in_project)
+            
+            # Ensure parent directory exists
+            target_dir = os.path.dirname(absolute_target_path)
+            if not os.path.exists(target_dir):
+                os.makedirs(target_dir, exist_ok=True)
+                logger.info(f"[{self.state.task_id}] Created directory: {target_dir}")
+            
+            logger.info(f"[{self.state.task_id}] Writing to absolute path: {absolute_target_path}")
             write_result_str = self.file_writer_tool._run(
-                file_path=self.state.target_godot_file, 
+                file_path=absolute_target_path, 
                 content=self.state.generated_code
             )
             if "success" not in write_result_str.lower():
@@ -226,8 +244,22 @@ class ProcessCodeItemFlow(Flow[ProcessCodeItemFlowState]): # Using ProcessCodeIt
         self.state.current_status = "writing_refined_file"
         logger.info(f"[{self.state.task_id}] Step 5: Writing refined code to {self.state.target_godot_file}.")
         try:
+            # Construct absolute path to target file in Godot project
+            relative_file_path_in_project = self.state.target_godot_file
+            if relative_file_path_in_project.startswith("res://"):
+                relative_file_path_in_project = relative_file_path_in_project[len("res://"):]
+            
+            absolute_target_path = os.path.join(self.flow_input.godot_project_path, relative_file_path_in_project)
+            
+            # Ensure parent directory exists
+            target_dir = os.path.dirname(absolute_target_path)
+            if not os.path.exists(target_dir):
+                os.makedirs(target_dir, exist_ok=True)
+                logger.info(f"[{self.state.task_id}] Created directory: {target_dir}")
+            
+            logger.info(f"[{self.state.task_id}] Writing to absolute path: {absolute_target_path}")
             rewrite_result_str = self.file_writer_tool._run(
-                file_path=self.state.target_godot_file,
+                file_path=absolute_target_path,
                 content=self.state.refined_code
             )
             if "success" not in rewrite_result_str.lower():

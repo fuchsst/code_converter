@@ -1,5 +1,5 @@
 # Core dependencies
-crewai>=0.120.1
+crewai>=0.121.0
 openai>=1.0.0 # Explicitly add openai
 httpx>=0.23.0   # Explicitly add httpx
 google-genai
@@ -23,7 +23,7 @@ fire
 # openpyxl
 
 # Optional: For CrewAI tools if used directly
-crewai-tools>=0.40.1
+crewai-tools>=0.45.0
 crewai[tools]
 
 # Graph analysis dependencies
